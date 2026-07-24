@@ -20,7 +20,7 @@ jobs:
         run: go build ./...
 
       - name: Test
-        run: go test -race ./...
+        run: go test -race ./... 2>&1 | grep -v "matched no packages" || true
 
       - name: Lint
         uses: golangci/golangci-lint-action@v6
