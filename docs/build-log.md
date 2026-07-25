@@ -51,3 +51,18 @@ where the agent drifted, and how it was corrected.
   interfaces.go because filename + existing type docs already carry the role, rather
   than commenting every file. Restraint was the right call.
 - **Artifacts:** commit `docs: add package and file doc comments`. No ADR. No tests changed.
+
+### 2026-07-24 — Gate caught permanent-starvation invariant violation in FIFO
+
+- **Task handed off:** vertical slice (prior commit); pushed through no-mistakes gate.
+- **What the gate found:** FIFO's head-of-line `break` (fifo.go:34) permanently starves
+  the whole queue behind any job that can never fit (Needs > every worker), violating
+  the non-negotiable "every job eventually scheduled" invariant. Concrete repro in the
+  finding. The slice's own tests missed it — uniform job/worker sizing never exercised
+  the path.
+- **What needed correction / design call:** two problems separated — (1) impossible job
+  is an *admission* concern, reject at submit; (2) head-of-line blocking kept strict for
+  v1 (backfill deferred as non-goal). Human made the call; agent implements.
+- **Decision / outcome:** admission check + ADR, keep strict FIFO, add non-uniform tests
+  that fail-then-pass. Verified the finding against fifo.go before acting.
+- **Artifacts:** ADR (admission), fix commit, new tests. Gate run aborted and re-pushed.
