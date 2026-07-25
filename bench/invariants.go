@@ -57,8 +57,10 @@ type interval struct {
 
 // checkCapacityInvariant asserts no worker's dispatched jobs ever overlap
 // beyond its capacity, using each dispatch's fixed w.JobDuration as its
-// occupancy window — the same interval-overlap reconstruction
-// scheduler_test.go's assertNoCapacityViolation uses.
+// occupancy window. scheduler_test.go's assertNoCapacityViolation
+// reconstructs the same intervals but still sums pairwise overlaps against
+// each interval's whole span, which over-counts legitimate bin-packing
+// (see invariants_test.go); this sweep is the fixed version.
 func checkCapacityInvariant(w Workload, log []api.Decision) []string {
 	var violations []string
 
