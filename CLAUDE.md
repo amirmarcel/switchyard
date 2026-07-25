@@ -51,6 +51,9 @@ These back the deterministic-replay invariant and are mandatory in any schedulin
 - **Folders are created as they fill, not upfront.** No empty placeholder packages.
 - If a task seems to require going beyond its stated scope, stop and flag it
   rather than expanding silently.
+- A benchmark/eval scenario ships early, not as a finale: once the executor and a
+  workload profile exist, build one reference scenario with a scoring rubric so it
+  acts as a behavioral guardrail for later subsystems — not just a final report.
 
 ## Workflow
 
@@ -67,3 +70,16 @@ These back the deterministic-replay invariant and are mandatory in any schedulin
 
 - Idiomatic Go; pass `golangci-lint`.
 - Prefer small, reviewable changes. One concern per PR.
+
+## Documentation comments
+
+- Each package has ONE package doc comment, in a `doc.go` or the package's most
+  central file, immediately above `package X` with no blank line, starting
+  "Package X ...". It states the package's role and rationale, not a file list.
+- Other files may carry a one-line header above `package X` naming the file's role
+  ("// leases.go: lease issuance and fencing for the at-most-once invariant") —
+  only where it aids navigation. Skip it where the filename already says it.
+- Test files get a header only when the test's purpose isn't obvious from its name.
+- Comments explain WHY and the file's ROLE, never restate what the code does.
+- Keep them CURRENT: when a file's responsibility changes, update its comment in
+  the same change. A stale doc comment is worse than none.

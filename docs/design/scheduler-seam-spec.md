@@ -94,7 +94,8 @@ Every scheduling action emits one `Decision`, whether it dispatches or deliberat
 
 ```go
 type Outcome int
-const ( Dispatch Outcome = iota; Hold )   // Hold = deliberately leave capacity idle
+const ( Dispatch Outcome = iota; Hold; Reject )   // Hold = deliberately leave capacity idle;
+                                                   // Reject = admission-time, see docs/adr/0001-admission-check-for-unplaceable-jobs.md
 
 type Decision struct {
     Outcome   Outcome
@@ -223,6 +224,7 @@ for pq.Len() > 0 {              // pq = event priority queue, ordered by (At, se
 
 The scheduler is the natural place to enforce/check the invariants from the README:
 
+- **no permanent starvation** — a job that could never fit any registered worker is rejected (`Outcome: Reject`) at submission, before it can wedge a strict-head-of-line policy's queue forever. See docs/adr/0001-admission-check-for-unplaceable-jobs.md.
 - **capacity never exceeded** — reject/assert in `Handle` before enacting a Dispatch.
 - **at-most-once** — a `JobCompleted` for an already-completed job is ignored; lease fencing rejects completions from expired leases.
 - **dependencies respected** — a job only enters `Pending()` once all `Deps` have completed.
