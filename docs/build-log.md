@@ -91,5 +91,5 @@ where the agent drifted, and how it was corrected.
   so rather than gaming the assertion to match the prediction.
 - **Decision / outcome:** committed. Capacity fix now locked by regression tests. Stale doc
   comment on the checker also fixed (CLAUDE.md "keep comments current" rule).
-- **Artifacts:** commits `test: pin capacity-invariant...` and `feat: benchmark harness...`,
-  ADR-0002. Tests green under -race ×5.
+- **Artifacts:** squash-merged to main as a single `feat(bench)` commit (PR #5); ADR-0002 
+  (exact percentiles, replay-not-regenerate). Tests green under -race ×5.
