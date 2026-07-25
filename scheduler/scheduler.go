@@ -1,7 +1,10 @@
-// Package scheduler is the backend-agnostic core: it owns the pending
-// queue, worker registry, and live assignments, and drives a Policy through
-// an Executor. It is single-threaded — exactly one goroutine may call
-// Handle — all concurrency lives in the drivers and executors.
+// Package scheduler is the backend-agnostic core described in
+// docs/design/scheduler-seam-spec.md: it owns the pending queue, worker
+// registry, and live assignments, and drives a Policy through an Executor.
+// It is single-threaded — exactly one goroutine may call Handle — all
+// concurrency lives in the drivers and executors (packages executor and
+// simulation), never here, which is what keeps Policy pure and the
+// resulting decision log replayable.
 package scheduler
 
 import (

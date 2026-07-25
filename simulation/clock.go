@@ -1,6 +1,9 @@
-// Package simulation is the discrete-event, logical-time backend: it
-// advances time from event to event instead of sleeping, so the same
-// scheduler core can be replayed deterministically at scale.
+// Package simulation is the discrete-event, logical-time backend from
+// docs/design/scheduler-seam-spec.md: it advances time from event to event
+// instead of sleeping, so the same scheduler core that drives real
+// execution (package executor) can also be replayed deterministically at
+// scale. Time only ever moves forward to the next popped event's
+// timestamp — never by sleeping — which is what makes large sim runs fast.
 package simulation
 
 import "github.com/amirmarcel/switchyard/api"

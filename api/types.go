@@ -1,5 +1,9 @@
 // Package api defines the domain types and the seam interfaces (Clock,
 // State, Policy, Executor) that the scheduler core and both backends share.
+// This is the vertical-slice implementation of the seam described in
+// docs/design/scheduler-seam-spec.md: keeping it dependency-free is what
+// lets the real and sim backends (packages executor and simulation) each
+// depend on it without depending on each other.
 package api
 
 // JobID, WorkerID, and Time are distinct types so they can't be confused

@@ -1,3 +1,6 @@
+// scheduler_test.go: sim-backed FIFO harness proving the determinism and
+// capacity invariants on a 20-job/3-worker run (see executor/driver_test.go
+// for the same acceptance bar on the real backend).
 package scheduler_test
 
 import (
