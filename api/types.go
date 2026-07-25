@@ -57,6 +57,7 @@ type Outcome int
 const (
 	Dispatch Outcome = iota
 	Hold
+	Reject // admission-time: job can never fit any worker, never enters Pending
 )
 
 // Decision is the first-class, logged unit of every scheduling action,

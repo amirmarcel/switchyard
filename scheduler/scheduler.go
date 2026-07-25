@@ -49,20 +49,27 @@ func NewScheduler(policy api.Policy, clock api.Clock, executor api.Executor) *Sc
 // State snapshot, calls policy.Schedule, enacts each Decision via
 // executor.Dispatch, and records every Decision to the log.
 func (s *Scheduler) Handle(e api.Event) []api.Decision {
-	if !s.apply(e) {
-		return nil
+	now := s.clock.Now()
+
+	admission, changed := s.apply(e, now)
+
+	var decisions []api.Decision
+	if admission != nil {
+		decisions = append(decisions, *admission)
+		s.decisionLog = append(s.decisionLog, *admission)
+	}
+	if !changed {
+		return decisions
 	}
 
-	now := s.clock.Now()
-	decisions := s.policy.Schedule(s.snapshot(), now)
-
-	for _, d := range decisions {
+	scheduled := s.policy.Schedule(s.snapshot(), now)
+	for _, d := range scheduled {
 		if d.Outcome == api.Dispatch {
 			s.enactDispatch(d, now)
 		}
 		s.decisionLog = append(s.decisionLog, d)
 	}
-	return decisions
+	return append(decisions, scheduled...)
 }
 
 // DecisionLog returns a copy of every Decision recorded so far, in order.
@@ -72,26 +79,43 @@ func (s *Scheduler) DecisionLog() []api.Decision {
 	return out
 }
 
-// apply folds one event into scheduler state and reports whether
-// schedulability may have changed (i.e. whether a policy call is needed).
-func (s *Scheduler) apply(e api.Event) bool {
+// apply folds one event into scheduler state. It returns an admission
+// Decision when the event was a rejection (JobSubmitted only; nil
+// otherwise), and reports whether schedulability may have changed — i.e.
+// whether a policy call is needed.
+func (s *Scheduler) apply(e api.Event, now api.Time) (*api.Decision, bool) {
 	switch ev := e.(type) {
 	case api.JobSubmitted:
 		if _, exists := s.jobs[ev.Job.ID]; exists {
-			return false
+			return nil, false
+		}
+		if !s.admissible(ev.Job) {
+			// Rejected at submission, never enters Pending: no
+			// registered worker could ever satisfy Needs, so admitting
+			// it would let it wedge FIFO's strict head-of-line queue
+			// forever. See docs/adr/0001-admission-check-for-unplaceable-jobs.md.
+			d := api.Decision{
+				Outcome:    api.Reject,
+				Job:        ev.Job.ID,
+				Policy:     "admission",
+				Factors:    map[string]float64{"exceeds_max_worker_capacity": 1},
+				QueueDelay: now - ev.Job.SubmitAt,
+				At:         now,
+			}
+			return &d, false
 		}
 		s.jobs[ev.Job.ID] = ev.Job
 		s.submissionSeq[ev.Job.ID] = s.nextSeq
 		s.nextSeq++
-		return true
+		return nil, true
 
 	case api.WorkerRegistered:
 		if _, exists := s.workers[ev.Worker.ID]; exists {
-			return false
+			return nil, false
 		}
 		s.workers[ev.Worker.ID] = ev.Worker
 		s.usedCap[ev.Worker.ID] = api.Resources{}
-		return true
+		return nil, true
 
 	case api.JobCompleted:
 		a, ok := s.running[ev.Job]
@@ -99,23 +123,23 @@ func (s *Scheduler) apply(e api.Event) bool {
 			// Stale or duplicate completion for a job that's no longer
 			// (or never was) running under this assignment — ignored.
 			// This is the at-most-once safeguard.
-			return false
+			return nil, false
 		}
 		s.releaseAssignment(a)
 		s.completed[ev.Job] = true
-		return true
+		return nil, true
 
 	case api.JobFailed:
 		a, ok := s.running[ev.Job]
 		if !ok || a.Worker != ev.Worker {
-			return false
+			return nil, false
 		}
 		s.releaseAssignment(a)
-		return true
+		return nil, true
 
 	case api.CancelRequested:
 		if _, ok := s.jobs[ev.Job]; !ok || s.completed[ev.Job] {
-			return false
+			return nil, false
 		}
 		if a, ok := s.running[ev.Job]; ok {
 			_ = s.executor.Cancel(ev.Job)
@@ -123,11 +147,30 @@ func (s *Scheduler) apply(e api.Event) bool {
 		}
 		delete(s.jobs, ev.Job)
 		delete(s.submissionSeq, ev.Job)
-		return true
+		return nil, true
 
 	default:
-		return false
+		return nil, false
 	}
+}
+
+// admissible reports whether job could ever be dispatched to some
+// registered worker. It's a pure existence check — the result doesn't
+// depend on which order s.workers is visited in, so iterating the map
+// directly here doesn't threaten determinism the way it would inside
+// decision-ordering logic. If no worker is registered yet, admissibility
+// can't be determined, so the job is provisionally admitted; this slice's
+// drivers always register workers before submitting jobs.
+func (s *Scheduler) admissible(job api.Job) bool {
+	if len(s.workers) == 0 {
+		return true
+	}
+	for _, w := range s.workers {
+		if w.Capacity.CPUMillis >= job.Needs.CPUMillis && w.Capacity.MemBytes >= job.Needs.MemBytes {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Scheduler) releaseAssignment(a api.Assignment) {
