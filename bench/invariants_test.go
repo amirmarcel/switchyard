@@ -1,0 +1,112 @@
+// invariants_test.go: unit tests on checkCapacityInvariant itself, built
+// from hand-constructed decision logs rather than full scenario runs. They
+// pin the fix from pairwise-overlap to a start-point sweep: the old check
+// asked "do intervals i and j overlap anywhere in i's span," which
+// over-counts when a worker legitimately bin-packs several jobs that
+// pairwise-overlap a common long-lived job without ever being concurrent
+// with each other. The current check asks "which intervals are actually
+// active at this specific instant," which is the question that matters.
+package bench
+
+import (
+	"testing"
+
+	"github.com/amirmarcel/switchyard/api"
+)
+
+const capTestWorker = api.WorkerID("w")
+
+// capTestWorkload builds a single-worker Workload whose Jobs list matches
+// the dispatched job IDs 1:1 (each with the given needs), so
+// checkCapacityInvariant sees exactly the jobs it needs and nothing the
+// starvation/at-most-once checks in CheckInvariants would also flag.
+func capTestWorkload(capacity int, duration api.Time, needs map[api.JobID]int) Workload {
+	jobs := make([]TimedJob, 0, len(needs))
+	for id, cpu := range needs {
+		jobs = append(jobs, TimedJob{Job: api.Job{ID: id, Needs: api.Resources{CPUMillis: cpu}}})
+	}
+	return Workload{
+		Name:        "capacity-test",
+		Workers:     []api.Worker{{ID: capTestWorker, Capacity: api.Resources{CPUMillis: capacity}}},
+		Jobs:        jobs,
+		JobDuration: duration,
+	}
+}
+
+func dispatchAt(job api.JobID, at api.Time) api.Decision {
+	return api.Decision{Outcome: api.Dispatch, Job: job, Worker: capTestWorker, At: at}
+}
+
+// TestCapacityInvariantBinPackingWithinCapacity reconstructs the exact
+// shape of the real bug: a long-lived job A, and two shorter-overlap jobs
+// B and C that each pairwise-overlap A (near opposite ends of A's span)
+// but never overlap each other. True concurrent usage never exceeds 2
+// (A+C early, A+B late) against a capacity of 2 — this is legitimate
+// bin-packing, not a violation.
+//
+// Under the old pairwise-overlap-with-i's-whole-span check, reference A
+// would wrongly sum A+B+C (needs 1+1+1=3 > capacity 2) because B and C
+// both overlap *somewhere* in A's span, even though neither is active at
+// the same instant as the other. The start-point sweep only sums
+// intervals actually active at each reference instant, so it correctly
+// finds no instant where usage exceeds capacity.
+func TestCapacityInvariantBinPackingWithinCapacity(t *testing.T) {
+	const duration = api.Time(100)
+	w := capTestWorkload(2, duration, map[api.JobID]int{
+		"A": 1, "B": 1, "C": 1,
+	})
+
+	log := []api.Decision{
+		dispatchAt("A", 1000), // span [1000, 1100)
+		dispatchAt("C", 901),  // span [901, 1001)  -- overlaps A near A's start, ends just after it starts
+		dispatchAt("B", 1099), // span [1099, 1199) -- overlaps A near A's end, starts just before it ends
+	}
+	// B and C do not overlap each other: C ends at 1001, B starts at 1099.
+
+	if violations := checkCapacityInvariant(w, log); len(violations) != 0 {
+		t.Fatalf("expected no capacity violation for legitimate bin-packing, got: %v", violations)
+	}
+}
+
+// TestCapacityInvariantBinPackingOverCapacity is the positive control for
+// the test above: four jobs genuinely, simultaneously co-resident on one
+// worker (identical dispatch time and duration) whose combined needs
+// exceed capacity must be flagged.
+func TestCapacityInvariantBinPackingOverCapacity(t *testing.T) {
+	const duration = api.Time(100)
+	w := capTestWorkload(3, duration, map[api.JobID]int{
+		"W": 1, "X": 1, "Y": 1, "Z": 1,
+	})
+
+	log := []api.Decision{
+		dispatchAt("W", 0),
+		dispatchAt("X", 0),
+		dispatchAt("Y", 0),
+		dispatchAt("Z", 0),
+	}
+
+	violations := checkCapacityInvariant(w, log)
+	if len(violations) == 0 {
+		t.Fatal("expected a capacity violation: 4 x 1 CPU jobs concurrently on a 3 CPU worker")
+	}
+}
+
+// TestCapacityInvariantAdjacentBoundary asserts the check is half-open:
+// job A occupies the worker up to but not including its end tick, so a
+// job B starting exactly when A ends does not overlap it, even though
+// their combined needs would exceed capacity if they were concurrent.
+func TestCapacityInvariantAdjacentBoundary(t *testing.T) {
+	const duration = api.Time(100)
+	w := capTestWorkload(1, duration, map[api.JobID]int{
+		"A": 1, "B": 1,
+	})
+
+	log := []api.Decision{
+		dispatchAt("A", 0),   // span [0, 100)
+		dispatchAt("B", 100), // span [100, 200) -- starts exactly when A ends
+	}
+
+	if violations := checkCapacityInvariant(w, log); len(violations) != 0 {
+		t.Fatalf("expected no violation for adjacent, non-overlapping intervals, got: %v", violations)
+	}
+}
