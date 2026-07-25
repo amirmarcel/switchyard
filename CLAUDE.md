@@ -81,5 +81,10 @@ These back the deterministic-replay invariant and are mandatory in any schedulin
   only where it aids navigation. Skip it where the filename already says it.
 - Test files get a header only when the test's purpose isn't obvious from its name.
 - Comments explain WHY and the file's ROLE, never restate what the code does.
+- Delete comments that restate the line they sit above. A comment that narrates what
+  the code plainly does ("// increment the counter" above `count++`) is noise —
+  remove it. Keep comments only where they add what the code cannot say: an invariant
+  being upheld, a tradeoff, a non-obvious "why," or a pointer to the spec/ADR that
+  governs it.
 - Keep them CURRENT: when a file's responsibility changes, update its comment in
   the same change. A stale doc comment is worse than none.
