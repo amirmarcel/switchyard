@@ -66,3 +66,30 @@ where the agent drifted, and how it was corrected.
 - **Decision / outcome:** admission check + ADR, keep strict FIFO, add non-uniform tests
   that fail-then-pass. Verified the finding against fifo.go before acting.
 - **Artifacts:** ADR (admission), fix commit, new tests. Gate run aborted and re-pushed.
+
+### 2026-07-25 — Benchmark harness slice (bench/)
+
+- **Task handed off:** implement the benchmark harness from the spec — seeded burst
+  workload, sim-backend runner, exact p50/p95/p99 queue-delay percentiles, ≥5-run
+  median+spread methodology, JSON+stdout output, invariant checking. FIFO only, sim only,
+  no Prometheus/CLI/second policy (all deferred per spec).
+- **What came back:** the full bench/ package + ADR-0002 (exact-percentiles-from-raw-
+  samples over bucketed histograms; replay-not-regenerate). Percentile math is nearest-
+  rank over sorted raw samples; median takes the middle run whole (not field-averaged);
+  determinism asserted as a precondition.
+- **Bug caught during implementation:** the first capacity-invariant checker used pairwise
+  interval-overlap, which over-counts when jobs bin-pack (several jobs legitimately sharing
+  one worker within capacity) — same root cause inflated WorkerUtilization above 1.0. Agent
+  caught it, switched to a start-point sweep-line (sum active intervals at each interval
+  start), utilization settled to ~0.86.
+- **What needed correction / verification:** review found the fix had no regression test
+  pinning it — the same gap that let the earlier FIFO starvation bug ship. Had the agent add
+  three hand-constructed capacity tests (bin-packing within capacity, over capacity, adjacent-
+  interval boundary), verified fail-then-pass against a reverted pairwise checker. The agent
+  also corrected a wrong expectation I'd given it: the adjacent-boundary test does NOT
+  differentiate old vs new (both use strict `<` at edges) — it kept the test honest and said
+  so rather than gaming the assertion to match the prediction.
+- **Decision / outcome:** committed. Capacity fix now locked by regression tests. Stale doc
+  comment on the checker also fixed (CLAUDE.md "keep comments current" rule).
+- **Artifacts:** commits `test: pin capacity-invariant...` and `feat: benchmark harness...`,
+  ADR-0002. Tests green under -race ×5.

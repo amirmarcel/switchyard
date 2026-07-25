@@ -129,7 +129,7 @@ Making the Decision first-class is deliberate: **observability, replay, debuggin
 
 *(Note: the Decision object is the internal mechanism, not the project's identity. The identity is the evaluation platform; decisions are how it works.)*
 
-**Module layout** (folders are created as they fill, not upfront): `scheduler/`, `orchestrator/`, `executor/`, `simulation/`, `workload/`, `benchmark/`, `metrics/`, `chaos/`, `api/`, `cmd/`, `docs/adr/`.
+**Module layout** (folders are created as they fill, not upfront): `scheduler/`, `orchestrator/`, `executor/`, `simulation/`, `bench/`, `metrics/`, `chaos/`, `api/`, `cmd/`, `docs/adr/`.
 
 ---
 
