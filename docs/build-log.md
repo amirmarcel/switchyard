@@ -34,3 +34,20 @@ where the agent drifted, and how it was corrected.
 ## Entries
 
 <!-- newest first -->
+
+### 2026-07-24 — Doc comments across api/executor/scheduler/simulation
+
+- **Task handed off:** Add Go doc comments following the CLAUDE.md rules, with
+  judgment over which files need a package doc, a file header, or nothing. Explicitly
+  told it not to comment mechanically; asked it to report its choices.
+- **What came back:** One package doc per package (api/types.go, scheduler/scheduler.go,
+  simulation/clock.go, executor/clock.go — already present, updated to cross-reference
+  the seam spec and sibling packages). One file header added (scheduler/scheduler_test.go).
+  Everything else deliberately left alone with per-file reasoning.
+- **What needed correction:** Nothing. Verified comments-only: `git diff --stat` showed
+  5 files touched; grep for non-comment/non-blank changed lines returned empty.
+- **Decision / outcome:** Accepted as-is. The point worth recording is the agent
+  exercised the delegated judgment correctly — skipped fifo.go, state.go, events.go,
+  interfaces.go because filename + existing type docs already carry the role, rather
+  than commenting every file. Restraint was the right call.
+- **Artifacts:** commit `docs: add package and file doc comments`. No ADR. No tests changed.
