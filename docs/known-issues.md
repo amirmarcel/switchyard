@@ -44,6 +44,12 @@ build log when fixed. This file should shrink over time.
   cancelled-while-running-dep. The dependent vanishes from the decision log entirely.
   Caught inside a benchmark (as starvation) but the scheduler has no diagnostic.
 
+- **F15 (INFO): checkWorkConservation ignores Job.Deps in its pending-fit check. 
+  Counts a dependency-blocked job as a valid "would fit" candidate, so a legitimate 
+  hold could be flagged as an unexplained work-conservation violation once a Deps-using 
+  workload exists. Latent — no current scenario uses Deps. Fix alongside dependency-aware 
+  scheduling (with F4).  
+
 ## LOW — batch-fix when convenient
 
 - **F11–F14:** BurstParams input validation (negative window/duration panics);
