@@ -35,7 +35,7 @@ CacheKeys []string
 
 // On Worker (api/): the cache keys this worker is currently warm on.
 // (How warmth is established/updated is defined below.)
-WarmKeys []string
+WarmCache []string
 ```
 
 **Warmth model (make this decision explicit, keep it simple for v1):** a worker becomes
@@ -106,7 +106,7 @@ interactive prioritization falls out of the priority mechanism, per ADR-0003.
 
 ## Definition of "done"
 
-- [ ] `Job.CacheKeys` and `Worker.WarmKeys` added to `api/`.
+- [ ] `Job.CacheKeys` and `Worker.WarmCache` added to `api/`.
 - [ ] A deterministic warmth model (warm-on-run, no decay in v1) tracked by the scheduler.
 - [ ] A new `PriorityAffinity` policy implementing `Policy`, pure and deterministic,
       obeying priority ordering + affinity placement + work-conservation.
@@ -141,7 +141,7 @@ create new packages.
 ## First task to hand Claude Code
 
 > Read `docs/design/candidate-policy-spec.md` and ADR-0003, and implement the
-> priority+affinity candidate policy. Add `Job.CacheKeys` and `Worker.WarmKeys` to api/; a
+> priority+affinity candidate policy. Add `Job.CacheKeys` and `Worker.WarmCache` to api/; a
 > deterministic warm-on-run warmth model (no decay in v1) tracked by the scheduler; a new
 > `PriorityAffinity` policy in scheduler/ implementing the existing `Policy` interface —
 > pure and deterministic, ordering runnable jobs by (priority desc, submit asc, JobID) and

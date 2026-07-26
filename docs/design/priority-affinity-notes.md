@@ -83,15 +83,19 @@ itself, not in the policy:
    share the exact same logical instant — e.g. a job's completion event and
    some other event both land at `t`. The earlier of the two genuinely runs
    *before* that completion is processed, so the real scheduler still shows
-   the completing job occupying its worker at that instant, but
-   `freeCapacityAt`'s strictly half-open window `[At, At+duration)` treated
-   the boundary as already free for every decision at that `t`, including
-   ones that causally precede the completion. Fixed in
+   the completing job occupying its worker at that instant, but the
+   free-capacity reconstruction's strictly half-open window `[At,
+   At+duration)` treated the boundary as already free for every decision at
+   that `t`, including ones that causally precede the completion. Fixed in
    `bench/invariants.go` by making the window's upper bound inclusive
-   (`at <= At+duration`) for this reconstruction specifically —
-   `CheckCapacityInvariant` keeps its existing half-open convention, since it
-   only ever needs to reason about genuinely distinct instants, never
-   same-instant ties. Regression test:
+   (a dispatch stays active while `end == d.At`) for this reconstruction
+   specifically — `CheckCapacityInvariant` keeps its existing half-open
+   convention, since it only ever needs to reason about genuinely distinct
+   instants, never same-instant ties. (The reconstruction was later
+   rewritten from a per-hold rescan, `freeCapacityAt`, into
+   `checkWorkConservation`'s single forward sweep for performance — see the
+   F16 build-log entry — but this inclusive-boundary behavior is preserved.)
+   Regression test:
    `TestWorkConservationBoundaryTieNotFlagged` (`bench/invariants_test.go`).
 
 Both were found empirically, by reconstructing the real free-capacity state

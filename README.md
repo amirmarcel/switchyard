@@ -227,7 +227,7 @@ Stated up front, both as intellectual honesty and to preempt the obvious objecti
 
 - [ ] A real multi-stage CI job (checkout → build → test) runs in Docker via the executor.
 - [ ] The *same scheduler core* drives the simulator over a replayable scenario.
-- [ ] Baseline (FIFO) + one candidate policy, benchmarked per the methodology above.
+- [x] Baseline (FIFO) + one candidate policy, benchmarked per the methodology above.
 - [ ] The **reference evaluation scenario** produces a defensible delta.
 - [ ] **All scheduler invariants verified** to hold across every benchmarked run.
 - [ ] One **chaos experiment** (worker killed mid-job) showing lease-based recovery, with recovery time measured.
@@ -276,8 +276,8 @@ Target 6–8 ADRs. Seeds:
 ## Open decisions to lock before writing code
 
 - [ ] **Name.** Switchyard is a placeholder.
-- [ ] **The candidate scheduling policy for v1** — priority+affinity vs. weighted fair queueing.
-- [ ] **The contention-motivated policy** — interactive prioritization vs. duplicate-job detection.
+- [x] **The candidate scheduling policy for v1** — priority+affinity, chosen over WFQ (ADR-0003).
+- [x] **The contention-motivated policy** — interactive prioritization, resolved for free by priority+affinity (ADR-0003).
 - [ ] **Docker-only vs. a thin k8s layer for v1** — recommendation: Docker for v1, k8s as expansion.
 - [ ] **Metrics stack** — Prometheus + OpenTelemetry assumed; confirm.
 - [ ] **How realistic the checkout → build → test job needs to be.**
