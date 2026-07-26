@@ -1,7 +1,7 @@
 # Switchyard — Core Hardening Slice (Option A) — design spec
 
 **Purpose.** Close the live and reachable-now findings from
-`docs/reviews/2026-07-25-scheduler-review.md` before adding the second policy. This slice
+`docs/reviews/2026-07-25-opus-code-review.md` before adding the second policy. This slice
 makes the core *honest* — it fixes an invariant that is actively violated on the shipped
 scenario (F3), closes a starvation bug reachable by event ordering (F2), removes a
 knowingly-broken checker (G1), and adds the test that proves the load-bearing dual-backend
@@ -139,7 +139,7 @@ slice, after this one merges.
 
 ## First task to hand Claude Code
 
-> Read `docs/reviews/2026-07-25-scheduler-review.md`, `docs/known-issues.md`, and
+> Read `docs/reviews/2026-07-25-opus-code-review.md`, `docs/known-issues.md`, and
 > `docs/design/core-hardening-spec.md`. Implement the Option A hardening slice: F2, F3
 > (+ ADR-0004), G1, G4 as specified — nothing else. Do NOT touch F1, F5, or any other
 > known-issue. For F2, re-run admission on `WorkerRegistered` and reject now-unplaceable

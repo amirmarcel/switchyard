@@ -45,9 +45,12 @@ it's a distinct policy behavior, not a correctness requirement.
   backfill or any other change to `FIFO.Schedule`.
 - Admission is checked against *currently registered* workers at
   submission time. If no worker is registered yet, the job is
-  provisionally admitted (admissibility can't be determined). This slice's
-  drivers always register workers before submitting jobs, so this is not
-  exercised, but it's a known gap if that ordering ever changes.
+  provisionally admitted (admissibility can't be determined). The gap this
+  left — a job submitted before any worker exists could stay wedged in the
+  pending set forever if the eventual worker pool could never fit it — is
+  closed: `Scheduler.apply`'s `WorkerRegistered` handling re-runs admission
+  over the pending set and rejects any now-unplaceable jobs
+  (`rejectUnplaceablePending` in `scheduler/scheduler.go`).
 - A rejected job produces no `Assignment` and no completion event; there is
   no retry or resubmission path in this slice. Anything that wants one
   (e.g. an orchestrator letting a human resize the job) is future work.
