@@ -56,6 +56,9 @@ build log when fixed. This file should shrink over time.
   warm-up exclusion specified but unimplemented; `WorkerUtilization` is CPU-only but
   generically named; `DecisionLog()` shallow-copies (shared `Factors` maps). Group-fix.
 
+- **F16 (LOW/perf):** checkWorkConservation's pending-fit loop is O(holds × jobs × workers).
+  The capacity-reconstruction quadratic was fixed (single sweep); the remaining cost is checking, per hold, whether any pending job would fit — ~49M lookups on the 200-job affinity scenario, ~11s/run under -race. Mitigated by a testing.Short() skip on the fast path. Optimize (e.g. track a running "smallest pending job that fits" rather than re-scanning) if/when it bites the full suite meaningfully.
+
 ## Explicitly not tracked
 
 Pure style nits (§6 of the review) are left to be swept up as files are touched.
