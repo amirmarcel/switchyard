@@ -137,6 +137,65 @@ func TestFIFOPassesWorkConservationChecker(t *testing.T) {
 	}
 }
 
+// TestWorkConservationBoundaryTieNotFlagged pins a fix found while
+// validating PriorityAffinity on the burst scenario: two Schedule calls can
+// legitimately share the exact same logical instant (e.g. a job's
+// completion and some other event both land at t), and the earlier of the
+// two is genuinely evaluated *before* that completion is processed — the
+// real scheduler still shows the completing job occupying its worker at
+// that instant. freeCapacityAt's window must treat the boundary
+// (at == dispatch.At+duration) as still-occupying for this reason, unlike
+// CheckCapacityInvariant's strictly half-open window (which only needs to
+// reason about genuinely distinct instants, never same-instant ties). Before
+// this fix, job A's capacity was reconstructed as already free at t=100,
+// so holding B (which doesn't actually fit until A's completion is
+// processed) was wrongly flagged as an unexplained hold.
+func TestWorkConservationBoundaryTieNotFlagged(t *testing.T) {
+	const duration = api.Time(100)
+	w := capTestWorkload(1000, duration, map[api.JobID]int{
+		"A": 600, "B": 500,
+	})
+
+	log := []api.Decision{
+		dispatchAt("A", 0), // occupies [0,100], including the boundary itself
+		{Outcome: api.Hold, Job: "B", Factors: map[string]float64{"no_capacity": 1}, At: 100},
+	}
+
+	if violations := checkWorkConservation(w, log); len(violations) != 0 {
+		t.Fatalf("expected no violation for a hold at the exact instant a same-tick job's window ends, got: %v", violations)
+	}
+}
+
+// TestPriorityAffinityPassesWorkConservationChecker proves the affinity
+// policy's central claim from docs/design/candidate-policy-spec.md — it is
+// work-conserving, so it must never hold a job while a worker it fits is
+// free. Runs on the shipped burst scenario (heterogeneous job sizes, cache
+// keys, and priorities — see BurstScenario), which is the same run used to
+// compute the FIFO-vs-affinity comparison in compare_test.go, so a
+// regression here would also silently invalidate that benchmark's
+// InvariantsHeld claim.
+func TestPriorityAffinityPassesWorkConservationChecker(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping whole-scenario affinity work-conservation check in -short mode")
+	}
+	w := BurstScenario()
+	_, log := run(w, scheduler.PriorityAffinity{})
+
+	var holds int
+	for _, d := range log {
+		if d.Outcome == api.Hold {
+			holds++
+		}
+	}
+	if holds == 0 {
+		t.Fatal("expected at least one Hold decision on the burst scenario to make this test meaningful")
+	}
+
+	if violations := checkWorkConservation(w, log); len(violations) != 0 {
+		t.Fatalf("priority-affinity's holds should all be genuine no-capacity holds (it is work-conserving), got: %v", violations)
+	}
+}
+
 // badHoldPolicy always holds the head pending job, mislabeled as
 // "no_capacity" regardless of whether capacity actually exists — the
 // deliberately-bad policy checkWorkConservation must catch (it never

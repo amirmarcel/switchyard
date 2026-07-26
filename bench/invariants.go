@@ -123,6 +123,15 @@ func CheckCapacityInvariant(w Workload, log []api.Decision) []string {
 	return violations
 }
 
+// activeDispatch is one still-occupying Dispatch tracked by
+// checkWorkConservation's sweep (see below) between the log index it was
+// added and the index at which its window is retired.
+type activeDispatch struct {
+	end    api.Time
+	worker api.WorkerID
+	needs  api.Resources
+}
+
 // checkWorkConservation enforces CLAUDE.md's conditional work-conservation
 // invariant: a Hold is legal only if it's genuinely no-capacity, or it's a
 // declared reservation (FIFO's head_of_line_reserved — see
@@ -132,6 +141,21 @@ func CheckCapacityInvariant(w Workload, log []api.Decision) []string {
 // hold didn't say why it wasn't used. Any other Factors key is treated as a
 // declared reservation and passes unconditionally, so this also covers
 // future policies that reserve for reasons other than head-of-line.
+//
+// Free capacity is tracked with a single forward sweep and a running usedCap
+// tally, not a per-hold rescan of the whole log: every dispatch shares the
+// same w.JobDuration, and log.At is non-decreasing in index order (the
+// scheduler appends decisions in real event-processing order), so each
+// dispatch's end time (At+duration) is also non-decreasing in the order
+// dispatches are added. That makes `active` a plain FIFO — the oldest-added
+// entry always expires first — so retiring it costs O(1) amortized per
+// dispatch, the same start-point-sweep idea CheckCapacityInvariant already
+// uses. A policy that legitimately continues past a miss (like
+// PriorityAffinity, unlike FIFO's head-of-line break) produces far more
+// Holds than Dispatches; the previous per-hold freeCapacityAt rescan was
+// O(holds x log length), which is what made that shape slow. This is O(log
+// length) overall for the sweep, plus O(holds x jobs x workers) for the fit
+// check below, which was never the bottleneck.
 func checkWorkConservation(w Workload, log []api.Decision) []string {
 	var violations []string
 
@@ -159,29 +183,55 @@ func checkWorkConservation(w Workload, log []api.Decision) []string {
 		}
 	}
 
+	var active []activeDispatch
+	head := 0
+	usedCap := make(map[api.WorkerID]api.Resources, len(workerCap))
+
 	for i, d := range log {
-		if d.Outcome != api.Hold || declaresReservation(d.Factors) {
-			continue
+		// Retire dispatches whose window has fully ended before this
+		// decision's instant. Inclusive of the boundary (end == d.At keeps
+		// a dispatch active) for the same reason freeCapacityAt used to be:
+		// two Schedule calls can share one logical instant, and the earlier
+		// genuinely runs before a same-instant completion is processed.
+		for head < len(active) && active[head].end < d.At {
+			e := active[head]
+			u := usedCap[e.worker]
+			u.CPUMillis -= e.needs.CPUMillis
+			u.MemBytes -= e.needs.MemBytes
+			usedCap[e.worker] = u
+			head++
 		}
 
-		free := freeCapacityAt(log, i, workerCap, jobNeeds, w.JobDuration, d.At)
-		for _, tj := range w.Jobs {
-			id := tj.Job.ID
-			if submitAt[id] > d.At {
-				continue
-			}
-			if r, ok := resolvedAt[id]; ok && r < i {
-				continue
-			}
-			needs := jobNeeds[id]
-			for _, wk := range w.Workers {
-				fc := free[wk.ID]
-				if fc.CPUMillis >= needs.CPUMillis && fc.MemBytes >= needs.MemBytes {
-					violations = append(violations, fmt.Sprintf(
-						"unexplained hold for job %s at t=%d (Factors=%v): pending job %s fits worker %s (free %+v)",
-						d.Job, d.At, d.Factors, id, wk.ID, fc))
+		if d.Outcome == api.Hold && !declaresReservation(d.Factors) {
+			for _, tj := range w.Jobs {
+				id := tj.Job.ID
+				if submitAt[id] > d.At {
+					continue
+				}
+				if r, ok := resolvedAt[id]; ok && r < i {
+					continue
+				}
+				needs := jobNeeds[id]
+				for _, wk := range w.Workers {
+					cap := workerCap[wk.ID]
+					u := usedCap[wk.ID]
+					fc := api.Resources{CPUMillis: cap.CPUMillis - u.CPUMillis, MemBytes: cap.MemBytes - u.MemBytes}
+					if fc.CPUMillis >= needs.CPUMillis && fc.MemBytes >= needs.MemBytes {
+						violations = append(violations, fmt.Sprintf(
+							"unexplained hold for job %s at t=%d (Factors=%v): pending job %s fits worker %s (free %+v)",
+							d.Job, d.At, d.Factors, id, wk.ID, fc))
+					}
 				}
 			}
+		}
+
+		if d.Outcome == api.Dispatch {
+			n := jobNeeds[d.Job]
+			u := usedCap[d.Worker]
+			u.CPUMillis += n.CPUMillis
+			u.MemBytes += n.MemBytes
+			usedCap[d.Worker] = u
+			active = append(active, activeDispatch{end: d.At + w.JobDuration, worker: d.Worker, needs: n})
 		}
 	}
 
@@ -199,31 +249,4 @@ func declaresReservation(factors map[string]float64) bool {
 		}
 	}
 	return false
-}
-
-// freeCapacityAt reconstructs each worker's free capacity at time at, using
-// only Dispatch decisions that appear before index uptoIdx in log — i.e.
-// decisions already enacted by the time the Hold at uptoIdx was produced,
-// including earlier decisions from the same policy call.
-func freeCapacityAt(log []api.Decision, uptoIdx int, workerCap map[api.WorkerID]api.Resources, jobNeeds map[api.JobID]api.Resources, duration api.Time, at api.Time) map[api.WorkerID]api.Resources {
-	used := make(map[api.WorkerID]api.Resources, len(workerCap))
-	for i := 0; i < uptoIdx; i++ {
-		d := log[i]
-		if d.Outcome != api.Dispatch {
-			continue
-		}
-		if d.At <= at && at < d.At+duration {
-			u := used[d.Worker]
-			n := jobNeeds[d.Job]
-			u.CPUMillis += n.CPUMillis
-			u.MemBytes += n.MemBytes
-			used[d.Worker] = u
-		}
-	}
-	free := make(map[api.WorkerID]api.Resources, len(workerCap))
-	for id, cap := range workerCap {
-		u := used[id]
-		free[id] = api.Resources{CPUMillis: cap.CPUMillis - u.CPUMillis, MemBytes: cap.MemBytes - u.MemBytes}
-	}
-	return free
 }

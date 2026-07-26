@@ -52,6 +52,22 @@ type BurstParams struct {
 	ArrivalWindow api.Time // jobs arrive uniformly at random within [0, ArrivalWindow)
 	JobDuration   api.Time
 
+	// CacheKeyPoolSize and CacheKeysPerJob give jobs affinity to exploit: each
+	// job draws CacheKeysPerJob distinct keys from a pool of CacheKeyPoolSize
+	// names. A pool much smaller than JobCount is what creates meaningful
+	// overlap (many jobs sharing a key) rather than every job being unique.
+	// Zero (the default) assigns no CacheKeys, unchanged from before this
+	// field existed.
+	CacheKeyPoolSize int
+	CacheKeysPerJob  int
+
+	// HighPriorityCount jobs (by generation index, independent of the
+	// randomized arrival order) get Priority = HighPriority; every other job
+	// gets Priority 0. Zero (the default) assigns no priority, unchanged from
+	// before this field existed.
+	HighPriorityCount int
+	HighPriority      int
+
 	Seed int64
 }
 
@@ -86,11 +102,17 @@ func GenerateBurst(name string, p BurstParams) Workload {
 		if p.JobMemMax > p.JobMemMin {
 			mem += rng.Int63n(p.JobMemMax - p.JobMemMin + 1)
 		}
+		priority := 0
+		if i < p.HighPriorityCount {
+			priority = p.HighPriority
+		}
 		job := api.Job{
-			ID:       api.JobID(fmt.Sprintf("%s-job-%04d", name, i)),
-			Class:    api.Batch,
-			Needs:    api.Resources{CPUMillis: cpu, MemBytes: mem},
-			SubmitAt: submitAt,
+			ID:        api.JobID(fmt.Sprintf("%s-job-%04d", name, i)),
+			Class:     api.Batch,
+			Needs:     api.Resources{CPUMillis: cpu, MemBytes: mem},
+			Priority:  priority,
+			CacheKeys: cacheKeys(rng, name, p.CacheKeyPoolSize, p.CacheKeysPerJob),
+			SubmitAt:  submitAt,
 		}
 		jobs[i] = TimedJob{Job: job, SubmitAt: submitAt}
 	}
@@ -108,4 +130,30 @@ func GenerateBurst(name string, p BurstParams) Workload {
 		Jobs:        jobs,
 		JobDuration: p.JobDuration,
 	}
+}
+
+// cacheKeys draws n distinct keys (n = perJob, capped at poolSize) from a
+// pool of poolSize keys named "<name>-key-<i>", using rng so the draw stays
+// part of the seeded, replayable sequence. A pool smaller than JobCount is
+// what makes affinity meaningful: distinct jobs land on the same key and can
+// reuse a worker warmed by an earlier one. Returns nil when poolSize or
+// perJob is 0 (the default), so callers that don't set these fields keep
+// generating jobs with no CacheKeys, unchanged from before this existed.
+func cacheKeys(rng *rand.Rand, name string, poolSize, perJob int) []string {
+	if poolSize <= 0 || perJob <= 0 {
+		return nil
+	}
+	if perJob > poolSize {
+		perJob = poolSize
+	}
+	chosen := make(map[int]struct{}, perJob)
+	for len(chosen) < perJob {
+		chosen[rng.Intn(poolSize)] = struct{}{}
+	}
+	keys := make([]string, 0, perJob)
+	for i := range chosen {
+		keys = append(keys, fmt.Sprintf("%s-key-%03d", name, i))
+	}
+	sort.Strings(keys)
+	return keys
 }
