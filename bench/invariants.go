@@ -45,7 +45,8 @@ func CheckInvariants(w Workload, log []api.Decision) []string {
 		}
 	}
 
-	violations = append(violations, checkCapacityInvariant(w, log)...)
+	violations = append(violations, CheckCapacityInvariant(w, log)...)
+	violations = append(violations, checkWorkConservation(w, log)...)
 
 	return violations
 }
@@ -55,13 +56,14 @@ type interval struct {
 	needs      api.Resources
 }
 
-// checkCapacityInvariant asserts no worker's dispatched jobs ever overlap
+// CheckCapacityInvariant asserts no worker's dispatched jobs ever overlap
 // beyond its capacity, using each dispatch's fixed w.JobDuration as its
-// occupancy window. scheduler_test.go's assertNoCapacityViolation
-// reconstructs the same intervals but still sums pairwise overlaps against
-// each interval's whole span, which over-counts legitimate bin-packing
-// (see invariants_test.go); this sweep is the fixed version.
-func checkCapacityInvariant(w Workload, log []api.Decision) []string {
+// occupancy window. It is exported so scheduler_test.go can assert the same
+// capacity invariant from the scheduler package's own tests rather than
+// maintaining a second, divergent implementation (see
+// docs/reviews/2026-07-25-opus-code-review.md, finding G1 — the pairwise
+// overlap checker that shadowed this one and has since been deleted).
+func CheckCapacityInvariant(w Workload, log []api.Decision) []string {
 	var violations []string
 
 	jobNeeds := make(map[api.JobID]api.Resources, len(w.Jobs))
@@ -119,4 +121,109 @@ func checkCapacityInvariant(w Workload, log []api.Decision) []string {
 	}
 
 	return violations
+}
+
+// checkWorkConservation enforces CLAUDE.md's conditional work-conservation
+// invariant: a Hold is legal only if it's genuinely no-capacity, or it's a
+// declared reservation (FIFO's head_of_line_reserved — see
+// docs/adr/0004-fifo-non-work-conservation.md). A Hold whose Factors claim
+// only "no_capacity" is flagged if, at that instant, some worker actually
+// had free room a still-pending job would fit — capacity existed and the
+// hold didn't say why it wasn't used. Any other Factors key is treated as a
+// declared reservation and passes unconditionally, so this also covers
+// future policies that reserve for reasons other than head-of-line.
+func checkWorkConservation(w Workload, log []api.Decision) []string {
+	var violations []string
+
+	jobNeeds := make(map[api.JobID]api.Resources, len(w.Jobs))
+	submitAt := make(map[api.JobID]api.Time, len(w.Jobs))
+	for _, tj := range w.Jobs {
+		jobNeeds[tj.Job.ID] = tj.Job.Needs
+		submitAt[tj.Job.ID] = tj.SubmitAt
+	}
+	workerCap := make(map[api.WorkerID]api.Resources, len(w.Workers))
+	for _, wk := range w.Workers {
+		workerCap[wk.ID] = wk.Capacity
+	}
+
+	// resolvedAt records the log index at which a job first left the
+	// pending set (dispatched or rejected), so pending-at-a-given-index can
+	// be reconstructed without needing completions in the log.
+	resolvedAt := make(map[api.JobID]int, len(w.Jobs))
+	for i, d := range log {
+		if d.Outcome != api.Dispatch && d.Outcome != api.Reject {
+			continue
+		}
+		if _, ok := resolvedAt[d.Job]; !ok {
+			resolvedAt[d.Job] = i
+		}
+	}
+
+	for i, d := range log {
+		if d.Outcome != api.Hold || declaresReservation(d.Factors) {
+			continue
+		}
+
+		free := freeCapacityAt(log, i, workerCap, jobNeeds, w.JobDuration, d.At)
+		for _, tj := range w.Jobs {
+			id := tj.Job.ID
+			if submitAt[id] > d.At {
+				continue
+			}
+			if r, ok := resolvedAt[id]; ok && r < i {
+				continue
+			}
+			needs := jobNeeds[id]
+			for _, wk := range w.Workers {
+				fc := free[wk.ID]
+				if fc.CPUMillis >= needs.CPUMillis && fc.MemBytes >= needs.MemBytes {
+					violations = append(violations, fmt.Sprintf(
+						"unexplained hold for job %s at t=%d (Factors=%v): pending job %s fits worker %s (free %+v)",
+						d.Job, d.At, d.Factors, id, wk.ID, fc))
+				}
+			}
+		}
+	}
+
+	return violations
+}
+
+// declaresReservation reports whether Factors names anything besides
+// "no_capacity" — the checker's only legal reason to hold while capacity
+// exists. Order-independent existence check, so ranging the map directly
+// doesn't threaten determinism.
+func declaresReservation(factors map[string]float64) bool {
+	for k, v := range factors {
+		if k != "no_capacity" && v != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// freeCapacityAt reconstructs each worker's free capacity at time at, using
+// only Dispatch decisions that appear before index uptoIdx in log — i.e.
+// decisions already enacted by the time the Hold at uptoIdx was produced,
+// including earlier decisions from the same policy call.
+func freeCapacityAt(log []api.Decision, uptoIdx int, workerCap map[api.WorkerID]api.Resources, jobNeeds map[api.JobID]api.Resources, duration api.Time, at api.Time) map[api.WorkerID]api.Resources {
+	used := make(map[api.WorkerID]api.Resources, len(workerCap))
+	for i := 0; i < uptoIdx; i++ {
+		d := log[i]
+		if d.Outcome != api.Dispatch {
+			continue
+		}
+		if d.At <= at && at < d.At+duration {
+			u := used[d.Worker]
+			n := jobNeeds[d.Job]
+			u.CPUMillis += n.CPUMillis
+			u.MemBytes += n.MemBytes
+			used[d.Worker] = u
+		}
+	}
+	free := make(map[api.WorkerID]api.Resources, len(workerCap))
+	for id, cap := range workerCap {
+		u := used[id]
+		free[id] = api.Resources{CPUMillis: cap.CPUMillis - u.CPUMillis, MemBytes: cap.MemBytes - u.MemBytes}
+	}
+	return free
 }

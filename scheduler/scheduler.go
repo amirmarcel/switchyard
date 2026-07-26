@@ -54,9 +54,9 @@ func (s *Scheduler) Handle(e api.Event) []api.Decision {
 	admission, changed := s.apply(e, now)
 
 	var decisions []api.Decision
-	if admission != nil {
-		decisions = append(decisions, *admission)
-		s.decisionLog = append(s.decisionLog, *admission)
+	if len(admission) > 0 {
+		decisions = append(decisions, admission...)
+		s.decisionLog = append(s.decisionLog, admission...)
 	}
 	if !changed {
 		return decisions
@@ -79,11 +79,12 @@ func (s *Scheduler) DecisionLog() []api.Decision {
 	return out
 }
 
-// apply folds one event into scheduler state. It returns an admission
-// Decision when the event was a rejection (JobSubmitted only; nil
-// otherwise), and reports whether schedulability may have changed — i.e.
-// whether a policy call is needed.
-func (s *Scheduler) apply(e api.Event, now api.Time) (*api.Decision, bool) {
+// apply folds one event into scheduler state. It returns any admission
+// Decisions produced (JobSubmitted rejects at most one; WorkerRegistered
+// may reject several pending jobs re-evaluated against the changed pool;
+// nil for every other event), and reports whether schedulability may have
+// changed — i.e. whether a policy call is needed.
+func (s *Scheduler) apply(e api.Event, now api.Time) ([]api.Decision, bool) {
 	switch ev := e.(type) {
 	case api.JobSubmitted:
 		if _, exists := s.jobs[ev.Job.ID]; exists {
@@ -102,7 +103,7 @@ func (s *Scheduler) apply(e api.Event, now api.Time) (*api.Decision, bool) {
 				QueueDelay: now - ev.Job.SubmitAt,
 				At:         now,
 			}
-			return &d, false
+			return []api.Decision{d}, false
 		}
 		s.jobs[ev.Job.ID] = ev.Job
 		s.submissionSeq[ev.Job.ID] = s.nextSeq
@@ -115,7 +116,13 @@ func (s *Scheduler) apply(e api.Event, now api.Time) (*api.Decision, bool) {
 		}
 		s.workers[ev.Worker.ID] = ev.Worker
 		s.usedCap[ev.Worker.ID] = api.Resources{}
-		return nil, true
+		// A job submitted before any worker existed was provisionally
+		// admitted (admissible can't reject what it can't evaluate); now
+		// that the pool changed, re-check every still-pending job and
+		// reject any that are now provably unplaceable — closing the
+		// starvation gap ADR-0001 left open for this ordering. See
+		// docs/adr/0001-admission-check-for-unplaceable-jobs.md.
+		return s.rejectUnplaceablePending(now), true
 
 	case api.JobCompleted:
 		a, ok := s.running[ev.Job]
@@ -154,13 +161,50 @@ func (s *Scheduler) apply(e api.Event, now api.Time) (*api.Decision, bool) {
 	}
 }
 
+// rejectUnplaceablePending re-runs admissible over every job still in the
+// pending set (not completed, not running) in submission order, rejecting
+// any that can now be proven unplaceable against the current worker pool.
+func (s *Scheduler) rejectUnplaceablePending(now api.Time) []api.Decision {
+	ids := make([]api.JobID, 0, len(s.jobs))
+	for id := range s.jobs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return s.submissionSeq[ids[i]] < s.submissionSeq[ids[j]] })
+
+	var rejects []api.Decision
+	for _, id := range ids {
+		if s.completed[id] {
+			continue
+		}
+		if _, running := s.running[id]; running {
+			continue
+		}
+		job := s.jobs[id]
+		if s.admissible(job) {
+			continue
+		}
+		rejects = append(rejects, api.Decision{
+			Outcome:    api.Reject,
+			Job:        id,
+			Policy:     "admission",
+			Factors:    map[string]float64{"exceeds_max_worker_capacity": 1},
+			QueueDelay: now - job.SubmitAt,
+			At:         now,
+		})
+		delete(s.jobs, id)
+		delete(s.submissionSeq, id)
+	}
+	return rejects
+}
+
 // admissible reports whether job could ever be dispatched to some
 // registered worker. It's a pure existence check — the result doesn't
 // depend on which order s.workers is visited in, so iterating the map
 // directly here doesn't threaten determinism the way it would inside
 // decision-ordering logic. If no worker is registered yet, admissibility
-// can't be determined, so the job is provisionally admitted; this slice's
-// drivers always register workers before submitting jobs.
+// can't be determined, so the job is provisionally admitted; this is now
+// safe rather than a starvation gap, because rejectUnplaceablePending
+// re-checks every pending job the moment a worker registers (F2).
 func (s *Scheduler) admissible(job api.Job) bool {
 	if len(s.workers) == 0 {
 		return true
