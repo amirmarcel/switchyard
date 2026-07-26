@@ -1,6 +1,6 @@
 # Known issues
 
-Deferred findings from `docs/reviews/2026-07-25-scheduler-review.md`, each scheduled
+Deferred findings from `docs/reviews/2026-07-25-opus-code-review.md`, each scheduled
 against the milestone that makes it matter. Items graduate out of this file into the
 build log when fixed. This file should shrink over time.
 

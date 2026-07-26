@@ -6,10 +6,10 @@ package scheduler_test
 import (
 	"fmt"
 	"reflect"
-	"sort"
 	"testing"
 
 	"github.com/amirmarcel/switchyard/api"
+	"github.com/amirmarcel/switchyard/bench"
 	"github.com/amirmarcel/switchyard/scheduler"
 	"github.com/amirmarcel/switchyard/simulation"
 )
@@ -49,6 +49,13 @@ func scenarios() []scenario {
 	return []scenario{
 		{name: "20 jobs 3 workers", jobs: uniformJobs(20, 1000), workers: uniformWorkers(3, 1000), duration: 1000},
 		{name: "5 jobs 2 workers", jobs: uniformJobs(5, 1000), workers: uniformWorkers(2, 1000), duration: 500},
+		// Two 400-CPU jobs against one 1000-CPU worker: both fit
+		// concurrently on the same worker (bin-packing), unlike every other
+		// scenario here where each job saturates a whole worker on its own.
+		// Exercises enactDispatch's partial-capacity arithmetic and FIFO's
+		// running-free decrement directly at the scheduler level, not only
+		// through bench (see docs/reviews/2026-07-25-opus-code-review.md, G1).
+		{name: "bin-packing 2 jobs 1 worker", jobs: uniformJobs(2, 400), workers: uniformWorkers(1, 1000), duration: 1000},
 	}
 }
 
@@ -99,16 +106,16 @@ func TestCapacityInvariant(t *testing.T) {
 		t.Run(sc.name, func(t *testing.T) {
 			log := runSim(sc)
 
-			jobNeeds := make(map[api.JobID]api.Resources, len(sc.jobs))
+			w := bench.Workload{
+				Workers:     sc.workers,
+				JobDuration: sc.duration,
+			}
 			for _, j := range sc.jobs {
-				jobNeeds[j.ID] = j.Needs
+				w.Jobs = append(w.Jobs, bench.TimedJob{Job: j, SubmitAt: j.SubmitAt})
 			}
-			workerCap := make(map[api.WorkerID]api.Resources, len(sc.workers))
-			for _, w := range sc.workers {
-				workerCap[w.ID] = w.Capacity
+			if violations := bench.CheckCapacityInvariant(w, log); len(violations) != 0 {
+				t.Fatalf("capacity invariant violated: %v", violations)
 			}
-
-			assertNoCapacityViolation(t, log, jobNeeds, workerCap, sc.duration)
 
 			dispatchCount := make(map[api.JobID]int, len(sc.jobs))
 			for _, d := range log {
@@ -213,46 +220,60 @@ func TestNoStarvationWithNonUniformSizing(t *testing.T) {
 	}
 }
 
-type interval struct {
-	start, end api.Time
-	needs      api.Resources
-}
+// TestWorkerRegisteredRejectsNowUnplaceablePending is the review's exact
+// reproduction (finding F2): a job submitted before any worker exists is
+// provisionally admitted (admissible can't evaluate it yet); a worker then
+// registers too small for it. Before this fix, admission was never
+// revisited, so the oversized job Held forever and every normal job behind
+// it in FIFO's strict head-of-line queue starved permanently — the same
+// bug ADR-0001 already fixed for the submitted-after-workers-exist case,
+// resurrected by event ordering. This must fail before the fix (normals
+// never dispatch) and pass after (oversized rejected, normals dispatch).
+func TestWorkerRegisteredRejectsNowUnplaceablePending(t *testing.T) {
+	oversized := api.Job{ID: "oversized", Needs: api.Resources{CPUMillis: 9000}}
+	var normals []api.Job
+	for i := 0; i < 3; i++ {
+		normals = append(normals, api.Job{ID: api.JobID(fmt.Sprintf("normal-%d", i)), Needs: api.Resources{CPUMillis: 100}})
+	}
+	worker := api.Worker{ID: "worker-0", Capacity: api.Resources{CPUMillis: 1000}}
 
-func assertNoCapacityViolation(t *testing.T, log []api.Decision, jobNeeds map[api.JobID]api.Resources, workerCap map[api.WorkerID]api.Resources, duration api.Time) {
-	t.Helper()
+	clock := &simulation.Clock{}
+	queue := simulation.NewEventQueue()
+	exec := simulation.NewExecutor(clock, queue, 1000)
+	sched := scheduler.NewScheduler(scheduler.FIFO{}, clock, exec)
 
-	byWorker := make(map[api.WorkerID][]interval)
+	// Submitted before any worker is registered: admissible can't evaluate
+	// Needs against an empty pool, so this is provisionally admitted.
+	queue.Push(api.JobSubmitted{Job: oversized, Time: 0})
+	// The pool now exists, and it's too small for oversized.
+	queue.Push(api.WorkerRegistered{Worker: worker, Time: 1})
+	for i, j := range normals {
+		queue.Push(api.JobSubmitted{Job: j, Time: api.Time(2 + i)})
+	}
+
+	simulation.Run(sched, clock, queue)
+	log := sched.DecisionLog()
+
+	dispatchCount := make(map[api.JobID]int)
+	rejectCount := make(map[api.JobID]int)
 	for _, d := range log {
-		if d.Outcome != api.Dispatch {
-			continue
+		switch d.Outcome {
+		case api.Dispatch:
+			dispatchCount[d.Job]++
+		case api.Reject:
+			rejectCount[d.Job]++
 		}
-		byWorker[d.Worker] = append(byWorker[d.Worker], interval{
-			start: d.At,
-			end:   d.At + duration,
-			needs: jobNeeds[d.Job],
-		})
 	}
 
-	workerIDs := make([]api.WorkerID, 0, len(byWorker))
-	for w := range byWorker {
-		workerIDs = append(workerIDs, w)
+	if rejectCount[oversized.ID] != 1 {
+		t.Errorf("oversized job rejected %d times, want exactly 1 — WorkerRegistered must re-check pending admission", rejectCount[oversized.ID])
 	}
-	sort.Slice(workerIDs, func(i, j int) bool { return workerIDs[i] < workerIDs[j] })
-
-	for _, w := range workerIDs {
-		intervals := byWorker[w]
-		cap := workerCap[w]
-		for i := range intervals {
-			var used api.Resources
-			for j := range intervals {
-				if intervals[j].start < intervals[i].end && intervals[i].start < intervals[j].end {
-					used.CPUMillis += intervals[j].needs.CPUMillis
-					used.MemBytes += intervals[j].needs.MemBytes
-				}
-			}
-			if used.CPUMillis > cap.CPUMillis || used.MemBytes > cap.MemBytes {
-				t.Fatalf("capacity exceeded on worker %s at t=%d: used %+v > capacity %+v", w, intervals[i].start, used, cap)
-			}
+	if dispatchCount[oversized.ID] != 0 {
+		t.Errorf("oversized job dispatched %d times, want 0", dispatchCount[oversized.ID])
+	}
+	for _, j := range normals {
+		if got := dispatchCount[j.ID]; got != 1 {
+			t.Errorf("job %s dispatched %d times, want exactly 1 — a now-unplaceable head job must not starve jobs behind it", j.ID, got)
 		}
 	}
 }

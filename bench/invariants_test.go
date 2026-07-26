@@ -1,4 +1,4 @@
-// invariants_test.go: unit tests on checkCapacityInvariant itself, built
+// invariants_test.go: unit tests on CheckCapacityInvariant itself, built
 // from hand-constructed decision logs rather than full scenario runs. They
 // pin the fix from pairwise-overlap to a start-point sweep: the old check
 // asked "do intervals i and j overlap anywhere in i's span," which
@@ -12,13 +12,14 @@ import (
 	"testing"
 
 	"github.com/amirmarcel/switchyard/api"
+	"github.com/amirmarcel/switchyard/scheduler"
 )
 
 const capTestWorker = api.WorkerID("w")
 
 // capTestWorkload builds a single-worker Workload whose Jobs list matches
 // the dispatched job IDs 1:1 (each with the given needs), so
-// checkCapacityInvariant sees exactly the jobs it needs and nothing the
+// CheckCapacityInvariant sees exactly the jobs it needs and nothing the
 // starvation/at-most-once checks in CheckInvariants would also flag.
 func capTestWorkload(capacity int, duration api.Time, needs map[api.JobID]int) Workload {
 	jobs := make([]TimedJob, 0, len(needs))
@@ -63,7 +64,7 @@ func TestCapacityInvariantBinPackingWithinCapacity(t *testing.T) {
 	}
 	// B and C do not overlap each other: C ends at 1001, B starts at 1099.
 
-	if violations := checkCapacityInvariant(w, log); len(violations) != 0 {
+	if violations := CheckCapacityInvariant(w, log); len(violations) != 0 {
 		t.Fatalf("expected no capacity violation for legitimate bin-packing, got: %v", violations)
 	}
 }
@@ -85,7 +86,7 @@ func TestCapacityInvariantBinPackingOverCapacity(t *testing.T) {
 		dispatchAt("Z", 0),
 	}
 
-	violations := checkCapacityInvariant(w, log)
+	violations := CheckCapacityInvariant(w, log)
 	if len(violations) == 0 {
 		t.Fatal("expected a capacity violation: 4 x 1 CPU jobs concurrently on a 3 CPU worker")
 	}
@@ -106,7 +107,75 @@ func TestCapacityInvariantAdjacentBoundary(t *testing.T) {
 		dispatchAt("B", 100), // span [100, 200) -- starts exactly when A ends
 	}
 
-	if violations := checkCapacityInvariant(w, log); len(violations) != 0 {
+	if violations := CheckCapacityInvariant(w, log); len(violations) != 0 {
 		t.Fatalf("expected no violation for adjacent, non-overlapping intervals, got: %v", violations)
+	}
+}
+
+// TestFIFOPassesWorkConservationChecker runs FIFO on the shipped burst
+// scenario — the exact run the review instrumented and found 46% of holds
+// non-work-conserving by the letter of the invariant — and asserts every
+// Hold now passes checkWorkConservation: FIFO's holds are all declared
+// head-of-line reservations (see docs/adr/0004-fifo-non-work-conservation.md),
+// which the checker must accept.
+func TestFIFOPassesWorkConservationChecker(t *testing.T) {
+	w := BurstScenario()
+	_, log := run(w, scheduler.FIFO{})
+
+	var holds int
+	for _, d := range log {
+		if d.Outcome == api.Hold {
+			holds++
+		}
+	}
+	if holds == 0 {
+		t.Fatal("expected at least one Hold decision on the burst scenario to make this test meaningful")
+	}
+
+	if violations := checkWorkConservation(w, log); len(violations) != 0 {
+		t.Fatalf("FIFO's declared head-of-line holds should pass the work-conservation checker, got: %v", violations)
+	}
+}
+
+// badHoldPolicy always holds the head pending job, mislabeled as
+// "no_capacity" regardless of whether capacity actually exists — the
+// deliberately-bad policy checkWorkConservation must catch (it never
+// declares a reservation, per docs/adr/0004-fifo-non-work-conservation.md).
+type badHoldPolicy struct{}
+
+func (badHoldPolicy) Name() string { return "bad-hold" }
+
+func (badHoldPolicy) Schedule(s api.State, now api.Time) []api.Decision {
+	pending := s.Pending()
+	if len(pending) == 0 {
+		return nil
+	}
+	job := pending[0]
+	return []api.Decision{{
+		Outcome:    api.Hold,
+		Job:        job.ID,
+		Policy:     "bad-hold",
+		Factors:    map[string]float64{"no_capacity": 1},
+		QueueDelay: now - job.SubmitAt,
+		At:         now,
+	}}
+}
+
+// TestBadHoldPolicyFlaggedByWorkConservationChecker is the positive
+// control: a job that fits comfortably in a fully free worker, held anyway
+// under a false "no_capacity" claim with no declared reservation, must be
+// flagged.
+func TestBadHoldPolicyFlaggedByWorkConservationChecker(t *testing.T) {
+	w := Workload{
+		Name:        "bad-hold-test",
+		Workers:     []api.Worker{{ID: "w0", Capacity: api.Resources{CPUMillis: 1000}}},
+		Jobs:        []TimedJob{{Job: api.Job{ID: "j0", Needs: api.Resources{CPUMillis: 500}, SubmitAt: 0}, SubmitAt: 0}},
+		JobDuration: 1000,
+	}
+
+	_, log := run(w, badHoldPolicy{})
+
+	if violations := checkWorkConservation(w, log); len(violations) == 0 {
+		t.Fatal("expected the work-conservation checker to flag an unexplained hold while capacity existed")
 	}
 }

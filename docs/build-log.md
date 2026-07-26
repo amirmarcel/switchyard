@@ -35,6 +35,61 @@ where the agent drifted, and how it was corrected.
 
 <!-- newest first -->
 
+### 2026-07-25 — Core hardening slice (Option A): F2, F3, G1, G4
+
+- **Task handed off:** close four findings from
+  `docs/reviews/2026-07-25-opus-code-review.md` per
+  `docs/design/core-hardening-spec.md`, nothing else — explicitly not F1, F5, or
+  any other `docs/known-issues.md` item.
+- **What came back:**
+  - **F2** — `Scheduler.apply` now returns `[]api.Decision` instead of a single
+    `*api.Decision`; `WorkerRegistered` calls a new `rejectUnplaceablePending`
+    that re-runs `admissible` over every still-pending job in submission order
+    and rejects any now provably unplaceable. Provisional admission (no
+    worker registered yet) is kept, per the spec's stated preference, since
+    the re-check now closes the gap. Regression test
+    `TestWorkerRegisteredRejectsNowUnplaceablePending` reproduces the
+    review's exact repro; confirmed it fails against the pre-fix
+    `scheduler.go` (0 rejects, normals starved) and passes after.
+  - **F3** — `docs/adr/0004-fifo-non-work-conservation.md` declares FIFO's
+    head-of-line hold as the invariant's required explicit reservation.
+    `FIFO.Schedule`'s `Hold` now calls `holdFactor` to label
+    `no_capacity` vs `head_of_line_reserved`. `bench/invariants.go` gained
+    `checkWorkConservation`, wired into `CheckInvariants`, which reconstructs
+    free capacity per worker at each Hold's timestamp and flags a Hold whose
+    `Factors` claim only `no_capacity` when a still-pending job actually
+    fit somewhere. Tested both directions: FIFO on the shipped burst
+    scenario passes cleanly, and a deliberately-bad test policy
+    (`badHoldPolicy`) that mislabels a fitting hold is flagged.
+  - **G1** — deleted `scheduler_test.go`'s pairwise-overlap
+    `assertNoCapacityViolation` and its duplicate `interval` type. Exported
+    `bench.CheckCapacityInvariant` (previously unexported) so
+    `TestCapacityInvariant` calls the one corrected implementation instead of
+    maintaining a second. Added a bin-packing scenario (two 400-CPU jobs
+    against one 1000-CPU worker, both fit concurrently) to `scenarios()`,
+    which every existing scenario-driven test now also exercises.
+  - **G4** — new `executor/crossbackend_test.go`:
+    `TestSimAndRealAgreeOnPlacementUnderFIFO` drives identical jobs/workers
+    through both the sim and real (fake-executor) backends under FIFO and
+    asserts the job→worker maps match exactly, per the seam spec's
+    acceptance bar.
+- **What needed correction:** the first cross-backend test used 20 jobs
+  against 3 workers (mirroring `executor/driver_test.go`'s existing shape) and
+  failed intermittently — once jobs have to wait for a worker to free up,
+  which worker completes first is a real wall-clock race, not scheduling
+  logic, so placement can legitimately diverge from the sim's instantaneous
+  logical time without either backend having a bug. Fixed by sizing the test
+  so every job dispatches immediately on submission (`numJobs == numWorkers`,
+  each job needs a whole worker) — placement is then decided purely by
+  submission/worker order in both backends, which is what the seam spec's
+  bar is actually about.
+- **Decision / outcome:** all four findings closed as specified; F1, F5, and
+  everything else in `docs/known-issues.md` left untouched. `go vet`, `gofmt
+  -l`, and `go test -race ./...` (including `-count=3`) all clean.
+- **Artifacts:** ADR-0004; new tests in `scheduler/scheduler_test.go`,
+  `bench/invariants_test.go`, `executor/crossbackend_test.go`; no new
+  packages.
+
 ### 2026-07-24 — Doc comments across api/executor/scheduler/simulation
 
 - **Task handed off:** Add Go doc comments following the CLAUDE.md rules, with
