@@ -35,6 +35,133 @@ where the agent drifted, and how it was corrected.
 
 <!-- newest first -->
 
+### 2026-07-25 — checkWorkConservation perf: O(holds × log length) → O(log length)
+
+- **Task handed off:** `TestPriorityAffinityPassesWorkConservationChecker`
+  took ~23s (100s+ under `-race -count=5`) while FIFO's structurally-similar
+  test took 0.08s. Profiling pinned ~42% cumulative to
+  `checkWorkConservation` → `freeCapacityAt`. Root cause: `freeCapacityAt`
+  rescanned the whole log per Hold, so the checker was O(holds × log
+  length); FIFO has few holds (breaks on the first miss), PriorityAffinity
+  is work-conserving and `continue`s past every miss, so it legitimately
+  produces tens of thousands of holds on the burst scenario (30,803, per a
+  quick count) — the quadratic bites hard. Asked for a single
+  timestamp-ordered sweep with a running tally (matching
+  `CheckCapacityInvariant`'s existing start-point-sweep technique), a
+  `testing.Short()` guard on the expensive test, and confirmation the
+  checker's output doesn't change.
+- **What came back:** `freeCapacityAt` deleted; `checkWorkConservation` now
+  does one forward pass over the log, tracking `usedCap` incrementally and
+  retiring expired dispatches from a FIFO queue (`active`). This works
+  because every dispatch in a `Workload` shares one fixed `JobDuration`, and
+  `log.At` is non-decreasing in index order (the scheduler appends decisions
+  in real event-processing order) — so dispatch end times are added in
+  non-decreasing order too, making a plain queue (not a heap) sufficient:
+  the oldest-added entry always expires first. `TestPriorityAffinityPassesWorkConservationChecker`
+  gained a `testing.Short()` skip. Verified the checker's output is
+  unchanged by rerunning all four checker-behavior tests (FIFO pass,
+  bad-hold-policy positive control, the boundary-tie regression test, and
+  the affinity pass) — all still pass with the same semantics, just faster.
+- **What needed correction:** nothing — this was scoped tightly to the one
+  function the profiling identified; `CheckCapacityInvariant` (a separate,
+  already-adequate O(dispatches²)-per-worker check, not implicated by the
+  profile) was left untouched.
+- **Decision / outcome:** accepted. Timing:
+  `TestPriorityAffinityPassesWorkConservationChecker` alone: ~23s → ~2.2s
+  (no `-race`), and ~11s per run under `-race` (previously "100s+" for 5
+  runs combined, i.e. ~20s/run). `go test -short ./...`: 9.5s total (the
+  test now skips in that mode). Full suite `go test -race -count=5 ./...`:
+  clean, ~4m8s. Remaining cost in the un-skipped test is the fit-check inner
+  loop (holds × jobs × workers ≈ 49M lookups for this scenario's 30,803
+  holds), which the profiling didn't flag and which is out of scope here.
+- **Artifacts:** `bench/invariants.go` (`freeCapacityAt` removed,
+  `checkWorkConservation` rewritten as a sweep); `bench/invariants_test.go`
+  (`testing.Short()` guard). No new tests — behavior is unchanged by
+  design, pinned by the existing four checker tests.
+
+### 2026-07-25 — Priority + cache-affinity candidate policy
+
+- **Task handed off:** implement `PriorityAffinity` per
+  `docs/design/candidate-policy-spec.md` and ADR-0003 — priority ordering
+  plus warm-worker placement, work-conserving, pure/deterministic — and
+  extend the burst scenario with cache keys + priorities to produce a real
+  FIFO-vs-affinity comparison through the existing harness. Explicitly not
+  aging, warmth decay, WFQ/DRF, the real executor, Prometheus, or a CLI; not
+  F1/F5 or any other `docs/known-issues.md` item.
+- **What came back:** `api.Job.CacheKeys`/`api.Worker.WarmCache` already
+  existed in `api/types.go` (unused) — no model change needed there.
+  `scheduler.go`'s `enactDispatch` gained `warmOnRun`: warm-forever-on-dispatch,
+  merged/deduped/sorted for determinism. New `scheduler/priority_affinity.go`:
+  sorts pending by (priority desc, submit asc, JobID), places each job on the
+  free-capacity worker warmest on its `CacheKeys` (ties broken by worker ID),
+  records `priority`/`cache_affinity`/`warm_keys_matched` in `Factors` on
+  Dispatch. `bench/workload.go`'s `BurstParams` gained `CacheKeyPoolSize`/
+  `CacheKeysPerJob`/`HighPriorityCount`/`HighPriority` (all zero-default, so
+  every existing FIFO-only test is unaffected); `BurstScenario()` now carries
+  a 16-key pool (2 keys/job, meaningful overlap over 200 jobs) and a 20-job
+  high-priority subset. New `bench/compare_test.go` runs both policies
+  through the ≥5-run harness on the identical scenario and logs the p99 delta
+  and affinity hit-rate, asserting both are favorable and every invariant
+  (including work-conservation) holds under both. Four required tests added:
+  determinism, bounded no-starvation, warm-worker placement
+  (`scheduler/priority_affinity_test.go`), and a work-conservation-checker
+  pass on the burst scenario (`bench/invariants_test.go`).
+- **What needed correction:** three issues, all self-caught before landing
+  (running `TestPriorityAffinityPassesWorkConservationChecker` against the
+  real burst scenario, not from review):
+  1. The policy's `Hold` decisions initially included `"priority"` in
+     `Factors` alongside `"no_capacity"`. `bench.checkWorkConservation`'s
+     `declaresReservation` treats any Factors key other than `no_capacity`
+     as a declared reservation (that's how it tells FIFO's legitimate
+     head-of-line holds from a bug — ADR-0004) and would have silently
+     stopped checking every hold for a prioritized job, exactly the case
+     most worth checking. Fixed by keeping Hold `Factors` to
+     `{"no_capacity": 1}` only; `priority` stays on Dispatch decisions where
+     it's unambiguous.
+  2. First real run of the checker against the burst scenario failed with
+     hundreds of "unexplained hold" violations. Root-caused (not a policy
+     bug) to `checkWorkConservation` itself: it had only ever been exercised
+     against FIFO, whose holds are always the terminal decision of a
+     `Schedule` call. `PriorityAffinity` is work-conserving and `continue`s
+     past a miss, so a call can legitimately emit `Hold(job A), ...,
+     Dispatch(job B)` — the checker, walking the log index-by-index, didn't
+     yet know B's dispatch had already claimed the capacity it was asking
+     about when checking A's hold. Fixed in `scheduler/priority_affinity.go`
+     by emitting every Dispatch from a call before any Hold from the same
+     call (log-ordering only — doesn't change which job goes where).
+  3. Violations persisted after (1) and (2). Reconstructed the real
+     scheduler state by hand (temporary debug prints comparing
+     `s.FreeCapacity` inside `Schedule` against the checker's own
+     `freeCapacityAt` reconstruction at the flagged instants) and found a
+     second, independent bug: two separate `Schedule` calls can share the
+     exact same logical instant (e.g. a job's completion and some other
+     event both at `t`), and the earlier one genuinely runs *before* that
+     completion is processed — the real scheduler still shows the
+     completing job occupying its worker at that instant.
+     `freeCapacityAt`'s strictly half-open window treated the boundary as
+     already free for every decision at that `t`, flagging a hold that
+     hadn't actually had its capacity yet. Fixed by making the window's
+     upper bound inclusive for this specific reconstruction
+     (`bench/invariants.go`); `CheckCapacityInvariant` keeps its existing
+     half-open convention, since it only reasons about genuinely distinct
+     instants. Verified against the real scheduler state, not just the
+     checker's own output, before accepting the fix — the debug
+     reconstruction and the live `s.FreeCapacity` agreed once corrected.
+  All three documented in `docs/design/priority-affinity-notes.md`
+  alongside the modeling calls that weren't corrections (warm-on-dispatch
+  vs. warm-on-completion; no intra-batch warmth propagation).
+- **Decision / outcome:** accepted as specified, plus the two
+  `checkWorkConservation` fixes (findings 2 and 3 above — pre-existing
+  checker gaps this policy was the first to exercise, not new scope).
+  `go vet`, `gofmt -l`, and `go test -race ./...` all clean.
+- **Artifacts:** `docs/design/priority-affinity-notes.md` (design note);
+  `scheduler/priority_affinity.go` + `scheduler/priority_affinity_test.go`;
+  `bench/compare_test.go`; extended `bench/workload.go`, `bench/scenario.go`;
+  `bench/invariants.go` fix (boundary-tie reconstruction) +
+  `bench/invariants_test.go` (new `TestPriorityAffinityPassesWorkConservationChecker`,
+  `TestWorkConservationBoundaryTieNotFlagged`); ADR-0003 (already committed,
+  policy choice).
+
 ### 2026-07-25 — Core hardening slice (Option A): F2, F3, G1, G4
 
 - **Task handed off:** close four findings from

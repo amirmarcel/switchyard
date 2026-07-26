@@ -260,9 +260,35 @@ func (s *Scheduler) enactDispatch(d api.Decision, now api.Time) {
 	used.MemBytes += job.Needs.MemBytes
 	s.usedCap[d.Worker] = used
 
+	if len(job.CacheKeys) > 0 {
+		s.workers[d.Worker] = warmOnRun(worker, job.CacheKeys)
+	}
+
 	if err := s.executor.Dispatch(d); err != nil {
 		panic(fmt.Sprintf("scheduler: executor dispatch failed for job %q: %v", d.Job, err))
 	}
+}
+
+// warmOnRun implements the v1 warmth model from
+// docs/design/candidate-policy-spec.md: a worker becomes warm on a job's
+// CacheKeys the moment it runs that job (dispatch), and stays warm forever —
+// no decay or eviction in v1. Warmth is merged and deduplicated, sorted for
+// determinism, since PriorityAffinity reads it as an ordered slice.
+func warmOnRun(w api.Worker, keys []string) api.Worker {
+	set := make(map[string]struct{}, len(w.WarmCache)+len(keys))
+	for _, k := range w.WarmCache {
+		set[k] = struct{}{}
+	}
+	for _, k := range keys {
+		set[k] = struct{}{}
+	}
+	merged := make([]string, 0, len(set))
+	for k := range set {
+		merged = append(merged, k)
+	}
+	sort.Strings(merged)
+	w.WarmCache = merged
+	return w
 }
 
 // snapshot builds a deterministically-ordered State: any map iteration
