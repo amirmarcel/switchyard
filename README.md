@@ -33,11 +33,11 @@ Switchyard exists to make scheduling policy something you can **change, observe,
 ## What this platform evaluates (goals)
 
 - **Pluggable, comparable policies.** One `Scheduler` core hosting interchangeable policy modules, swapped by config. A FIFO **baseline** and at least one **candidate** policy, measured head to head.
-- **Real execution.** A real multi-stage CI job (checkout → build → test) runs in Docker on a worker pool. Not a paper design.
-- **Reproducible scale.** The simulator replays the *same scheduling code* against workloads from tens to hundreds of thousands of jobs.
-- **Correctness, not just speed.** Every run is checked against the scheduler invariants below — a policy is only "better" if it is faster *and* still correct.
+- **Real execution (planned).** The scheduler core is designed to drive a real Docker executor identically to the simulator; only the in-memory `FakeExecutor` (wall-clock, no containers) exists today.
+- **Reproducible scale.** The simulator replays the *same scheduling code* against workloads from tens to thousands of jobs today; scaling to hundreds of thousands is blocked on a known O(N²) snapshot cost in the scheduler core (known-issue F10).
+- **Correctness, not just speed.** Every run is checked against the capacity and work-conservation invariants below; automated checks for the others (at-most-once, cancellation, dependency-respect, retries) are not yet implemented (known-issue F5) — a policy is only "better" if it is faster *and* still correct.
 - **Multiple workload shapes as first-class inputs.**
-- **Fault tolerance demonstrated, not claimed.** Failure injection with measured recovery.
+- **Fault tolerance (planned).** Failure injection with measured recovery — not yet built; see Failure semantics.
 
 ---
 
@@ -78,15 +78,16 @@ The load-bearing decision is that **the scheduler core is backend-agnostic.** Th
               |                                           |
      +--------v---------+                       +---------v--------+
      |  Real executor   |    same interface     |    Simulator     |
-     |  Docker workers  | <-------------------> | discrete-event   |
-     |  wall-clock time |                       |  logical time    |
+     |  (planned: Docker|<---------------------->| discrete-event   |
+     |  workers, wall-  |                       |  logical time    |
+     |  clock time)     |                       |                  |
      +--------+---------+                       +---------+--------+
               |                                           |
               +---------------------+---------------------+
                                     |
                           +---------v---------+
-                          | Metrics + traces  |   Prometheus / OpenTelemetry
-                          | + decision log    |
+                          | Metrics + traces  |   (planned — stack
+                          | + decision log    |   unconfirmed)
                           +---------+---------+
                                     |
                           +---------v---------+
@@ -138,19 +139,20 @@ Making the Decision first-class is deliberate: **observability, replay, debuggin
 A scheduler is not successful because it is fast. It is successful because it is fast **while never violating correctness.** These are checked on every benchmark run, so the story becomes *"p95 improved while all invariants held,"* not just *"p95 improved."* They double as the correctness test suite, and they sit here — before the benchmark — because the benchmark measures how well the scheduler preserves them.
 
 - Every submitted job is **eventually scheduled** (no permanent starvation).
-- No job **executes more than once** (at-most-once completion, enforced by lease fencing under failure).
+- No job **executes more than once** (at-most-once completion). Lease fencing is designed to uphold this under failure but is not yet wired into the completion path (known-issue F1) — today the invariant holds only because the simulator never delivers a stale completion event.
 - **Worker capacity is never exceeded.**
-- **Job dependencies are respected** (a stage never starts before its predecessors finish).
-- **Cancellation propagates** to running and queued work.
-- **Retries preserve idempotency.**
+- **Job dependencies are respected** (a stage never starts before its predecessors finish). Enforced in the scheduler core, but not yet exercised by any test or scenario, and the work-conservation checker does not yet account for dependencies (known-issue F15).
+- **Cancellation propagates** to queued work — a cancelled job is removed from the pending set before dispatch. Cancellation of in-flight work does not yet stop execution (planned; known-issue F8): the running job completes and its result is discarded.
 - Scheduling is **deterministic** given the same workload and seed (prerequisite for replay).
 - **Work-conservation (conditional):** no runnable job idles while capacity exists — *unless a policy deliberately reserves capacity* (e.g. holding a worker for an incoming high-priority job). Non-work-conservation is therefore a documented, measured policy property, never a silent scheduling gap. This tension — backfill vs. reservation — is itself one of the things the platform is built to measure.
 
 ---
 
-## Failure semantics
+## Failure semantics (planned)
 
-Chaos injection is only interesting if the recovery path is specified. Worker failure is lease-based:
+No failure injection exists yet — no worker-kill chaos experiment, no lease expiry, no bounded retry. This section describes the intended design, not current behavior. Prerequisites before it can be built: lease fencing wired into the completion path (F1), bounded/attributed retries on `JobFailed` (F6, which currently triggers unbounded, unattributed re-dispatch), and real cancellation of in-flight work (F8).
+
+Intended design — chaos injection is only interesting if the recovery path is specified. Worker failure is lease-based:
 
 ```
 worker dies → lease expires → job becomes runnable again
@@ -158,7 +160,7 @@ worker dies → lease expires → job becomes runnable again
             → resume or restart
 ```
 
-Lease **fencing** is what upholds at-most-once: a job dispatched under an expired lease is rejected, so a briefly-partitioned worker cannot double-complete work that has already been rescheduled. Recovery time (lease expiry → re-dispatch → completion) is a measured output, not an assumption.
+Lease **fencing** is intended to uphold at-most-once: a job dispatched under an expired lease would be rejected, so a briefly-partitioned worker cannot double-complete work that has already been rescheduled. Recovery time (lease expiry → re-dispatch → completion) is meant to be a measured output once built.
 
 ---
 
@@ -191,7 +193,7 @@ The canonical scenario mixes all three profiles under contention and asks the qu
 Credibility lives here. Every reported result follows the same protocol:
 
 - **≥ 5 runs** per configuration; report the **median** and **percentiles**, never a single run or a bare average.
-- **Warm-up discarded** — steady-state only.
+- **Warm-up discarded** — steady-state only *(planned — not yet implemented)*.
 - **Fixed random seed** and **replayed** (not regenerated) workloads, so runs are comparable.
 - **Identical worker pool** and environment across the configurations being compared.
 - **Invariant check** runs alongside every benchmark; a violated invariant fails the run.
@@ -260,7 +262,7 @@ The finish bar matters more than the feature count. A complete, benchmarked v1 p
 
 ## Architecture Decision Records
 
-Target 6–8 ADRs. Seeds:
+Target 6–8 ADRs (4 written so far: 0001–0004; see `docs/adr/`). Seeds:
 
 1. Why FIFO as the baseline first.
 2. Why *this* candidate policy (e.g. WFQ or priority+affinity) rather than DRF for v1.
