@@ -61,10 +61,12 @@ func run(w Workload, p api.Policy) (Result, []api.Decision) {
 }
 
 // computeResult derives every Result field purely from the decision log
-// and the workload's fixed job duration — the same "reconstruct from the
+// and the workload's base job duration — the same "reconstruct from the
 // log" approach scheduler_test.go uses for its invariant checks. This sim
 // backend has no failure injection in this slice, so every Dispatch
-// eventually completes: Completed == the number of Dispatch decisions.
+// eventually completes: Completed == the number of Dispatch decisions. Each
+// dispatch's actual duration may be less than the base JobDuration — see
+// dispatchDuration (bench/invariants.go) and ADR-0006's warm-cache discount.
 func computeResult(w Workload, p api.Policy, log []api.Decision) Result {
 	samples := queueDelaySamples(log)
 
@@ -80,14 +82,15 @@ func computeResult(w Workload, p api.Policy, log []api.Decision) Result {
 		switch d.Outcome {
 		case api.Dispatch:
 			dispatched++
-			if end := d.At + w.JobDuration; end > makespan {
+			duration := dispatchDuration(w, d)
+			if end := d.At + duration; end > makespan {
 				makespan = end
 			}
 			// Workers bin-pack: several jobs can run concurrently on one
 			// worker, so utilization is CPU-time consumed vs. CPU-time
 			// available, not a slot count — a job doesn't occupy a whole
 			// worker just by being dispatched to it.
-			busyCPUTime += float64(jobCPU[d.Job]) * float64(w.JobDuration)
+			busyCPUTime += float64(jobCPU[d.Job]) * float64(duration)
 		case api.Reject:
 			rejected++
 		}

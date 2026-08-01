@@ -298,6 +298,20 @@ func (s *Scheduler) enactDispatch(d api.Decision, now api.Time) api.Decision {
 	s.usedCap[d.Worker] = used
 
 	if len(job.CacheKeys) > 0 {
+		// warm_overlap is computed from worker.WarmCache *before* this job's
+		// own keys are merged in below — it answers "how warm was this
+		// worker already," which is what the simulator's execution-time
+		// discount (docs/adr/0006-warm-cache-execution-discount.md) needs.
+		// Set here, uniformly for every policy's dispatches (not just
+		// PriorityAffinity's self-reported "cache_affinity"), because
+		// execution time is a property of the dispatch the scheduler
+		// enacted, not of which policy chose it.
+		if d.Factors == nil {
+			d.Factors = make(map[string]float64, 1)
+		}
+		matched := countWarmMatches(worker.WarmCache, job.CacheKeys)
+		d.Factors["warm_overlap"] = float64(matched) / float64(len(job.CacheKeys))
+
 		s.workers[d.Worker] = warmOnRun(worker, job.CacheKeys)
 	}
 
