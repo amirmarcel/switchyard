@@ -35,6 +35,47 @@ where the agent drifted, and how it was corrected.
 
 <!-- newest first -->
 
+### 2026-08-01 — Warm-cache execution-time discount (graded by cache overlap)
+
+- **Task handed off:** model the real payoff of cache affinity. Until now affinity only
+  affected *placement* (which warm worker a job lands on), not execution time — every job
+  ran for the same fixed duration regardless of warmth. That's why the FIFO-vs-affinity
+  benchmark showed a p50 win but a flat p99: smarter routing, but no modeled speedup from a
+  cache hit. Design decision (mine): a graded discount — reduce a job's duration in
+  proportion to the fraction of its CacheKeys the worker was warm on, capped at 50%. Lives
+  in the execution model (simulator), not the policy.
+- **What came back:** scheduler.enactDispatch now computes `warm_overlap` (fraction of a
+  dispatched job's CacheKeys the worker was warm on) and logs it into Decision.Factors for
+  every policy — core plumbing, no placement change. simulation/warmcache.go adds
+  DiscountedDuration(base, overlap): reduction = overlap × 0.5, so full match halves the
+  duration, partial match proportionally, no overlap none — a pure deterministic function.
+  The executor applies it when scheduling JobCompleted. ADR-0006 records the decision, the
+  50% cap, graded-not-flat, and execution-model-not-policy.
+- **What needed correction / the subtle consequence:** varying durations broke an
+  assumption the work-conservation checker relied on — with fixed durations, dispatch order
+  equalled completion order, so checkWorkConservation retired active dispatches with an
+  insertion-order FIFO. Once a warm-discounted job can finish *before* an
+  earlier-dispatched one, that FIFO retires the wrong dispatch and mis-computes free
+  capacity. Changed it to a min-heap ordered by end time. This path wasn't covered by any
+  existing test (all used uniform durations), so added
+  TestWorkConservationOutOfOrderCompletionDetectsFreedCapacity — dispatch A (ends 1000)
+  then B (warm, ends 500), hold C at t=600 when B has freed capacity C fits. Verified
+  discriminating: reverted the checker to insertion-order FIFO → test fails (violation
+  missed); restored the min-heap → passes. Checker output otherwise unchanged.
+- **Decision / outcome:** committed. The affinity story is now complete — routing to warm
+  workers AND those jobs finishing faster, with the benefit finally showing in the tail.
+  Benchmark (burst, ≥5 runs, median): affinity p99 vs FIFO went from 0.0% (flat) to an
+  8.9% win; both policies' absolute p99 dropped (FIFO 38188→25590, affinity 38178→23311)
+  since the discount speeds warm jobs under any policy, but affinity pulls further ahead
+  because it creates more warm hits (hit-rate 81.5%→83.5%). Faster warm completions free
+  workers sooner, cascading into lower queue delay for jobs still waiting. All invariants
+  hold; determinism preserved (grep clean, suite green under -race).
+- **Artifacts:** feat commit + ADR-0006. Tests: warmcache_test.go (grading, bound,
+  determinism, executor wiring), warm_overlap_test.go (graded overlap logged, absent for
+  keyless jobs, policy-independent under FIFO), and the out-of-order checker test. README
+  updates to follow (ADR count → 0001–0006; the "how much does cache affinity matter"
+  future-experiment line softened to keep it open for other workload shapes).
+
 ### 2026-08-01 — Lease fencing on completion/failure events (F1, F5)
 
 - **Task handed off:** implement lease fencing so at-most-once holds by
@@ -96,7 +137,47 @@ where the agent drifted, and how it was corrected.
   `bench/invariants.go`; new tests in `scheduler/scheduler_test.go` and
   `bench/invariants_test.go`; `docs/known-issues.md` F1/F5 removed
   (resolved). README wording changes proposed, not applied — see the
-  reviewer's response for the exact lines.
+  reviewer's response for the exact lines. This was the first "planned"
+  claim from the README accuracy audit that the code earned back — README
+  lines 38/142/163 flip from "planned" to "implemented" (fencing mechanism
+  only; the rest of Failure semantics stays planned).
+
+### 2026-07-31 — README-accuracy audit and honesty corrections
+
+- **Task handed off:** run an accuracy audit of README.md against the current code
+  and docs/known-issues.md — find every place the README claims a capability that
+  doesn't exist, isn't tested, or is contradicted by a known-issue. Report only,
+  no edits, then apply a specified subset of corrections.
+- **What the audit found:** seven present-tense claims for capabilities that don't
+  exist in the code — real Docker executor ("Not a paper design", but go.mod has
+  zero deps and only FakeExecutor exists), fault tolerance / failure injection (no
+  chaos code at all), lease fencing (LeaseID written but never read — F1),
+  cancellation of in-flight work (both Cancel() are no-ops — F8), retries/idempotency
+  (no retry mechanism — F6), Prometheus/metrics (no metrics code), and benchmark
+  warm-up discard (claimed in methodology, never implemented). Plus overstated claims:
+  "hundreds of thousands of jobs" (blocked by the O(N²) snapshot, F10) and "invariants
+  checked on every run" (only 2 of 7 invariants have automated checkers, F5). The
+  accurate sections (determinism, the two policies, admission/capacity, benchmark
+  methodology) were confirmed correct and tested.
+- **What needed correction / decisions made:** each false claim was tagged
+  soften-the-doc vs. build-the-code. Softened for now: Docker executor and metrics
+  → "(planned)"; fault tolerance and the whole Failure semantics section → framed as
+  intended design, not working behavior; retries invariant → removed from the list
+  (no mechanism to guarantee); scale claim → "tens to thousands today, hundreds of
+  thousands blocked on F10"; invariants-checked claim → narrowed to capacity +
+  work-conservation only. Lease fencing was kept as a design description but reworded
+  to the honest version: at-most-once currently holds only because the simulator never
+  delivers a stale completion event (F1) — which reads as deeper understanding than the
+  overclaim did. Cancellation narrowed to queued-work-only.
+- **Decision / outcome:** README now honestly separates what exists from what's planned.
+  Verified the two at-risk edits by reading the file (not the diff): the Failure
+  semantics section is coherent, and the architecture diagram still renders (the
+  "(planned: Docker...)" text wraps inside the box rather than overflowing). The audit
+  also surfaced that F1 (lease fencing) is a stronger next-build candidate than the
+  warm-cache discount — it converts a just-softened claim back to true and closes a real
+  correctness gap.
+- **Artifacts:** README.md corrections; this entry. No code changed. Audit was
+  report-then-wait; corrections applied finding-by-finding, not bulk.
 
 ### 2026-07-25 — checkWorkConservation perf: O(holds × log length) → O(log length)
 
@@ -280,6 +361,33 @@ where the agent drifted, and how it was corrected.
   `bench/invariants_test.go`, `executor/crossbackend_test.go`; no new
   packages.
 
+### 2026-07-25 — Benchmark harness slice (bench/)
+
+- **Task handed off:** implement the benchmark harness from the spec — seeded burst
+  workload, sim-backend runner, exact p50/p95/p99 queue-delay percentiles, ≥5-run
+  median+spread methodology, JSON+stdout output, invariant checking. FIFO only, sim only,
+  no Prometheus/CLI/second policy (all deferred per spec).
+- **What came back:** the full bench/ package + ADR-0002 (exact-percentiles-from-raw-
+  samples over bucketed histograms; replay-not-regenerate). Percentile math is nearest-
+  rank over sorted raw samples; median takes the middle run whole (not field-averaged);
+  determinism asserted as a precondition.
+- **Bug caught during implementation:** the first capacity-invariant checker used pairwise
+  interval-overlap, which over-counts when jobs bin-pack (several jobs legitimately sharing
+  one worker within capacity) — same root cause inflated WorkerUtilization above 1.0. Agent
+  caught it, switched to a start-point sweep-line (sum active intervals at each interval
+  start), utilization settled to ~0.86.
+- **What needed correction / verification:** review found the fix had no regression test
+  pinning it — the same gap that let the earlier FIFO starvation bug ship. Had the agent add
+  three hand-constructed capacity tests (bin-packing within capacity, over capacity, adjacent-
+  interval boundary), verified fail-then-pass against a reverted pairwise checker. The agent
+  also corrected a wrong expectation I'd given it: the adjacent-boundary test does NOT
+  differentiate old vs new (both use strict `<` at edges) — it kept the test honest and said
+  so rather than gaming the assertion to match the prediction.
+- **Decision / outcome:** committed. Capacity fix now locked by regression tests. Stale doc
+  comment on the checker also fixed (CLAUDE.md "keep comments current" rule).
+- **Artifacts:** squash-merged to main as a single `feat(bench)` commit (PR #5); ADR-0002
+  (exact percentiles, replay-not-regenerate). Tests green under -race ×5.
+
 ### 2026-07-24 — Doc comments across api/executor/scheduler/simulation
 
 - **Task handed off:** Add Go doc comments following the CLAUDE.md rules, with
@@ -311,98 +419,3 @@ where the agent drifted, and how it was corrected.
 - **Decision / outcome:** admission check + ADR, keep strict FIFO, add non-uniform tests
   that fail-then-pass. Verified the finding against fifo.go before acting.
 - **Artifacts:** ADR (admission), fix commit, new tests. Gate run aborted and re-pushed.
-
-### 2026-07-25 — Benchmark harness slice (bench/)
-
-- **Task handed off:** implement the benchmark harness from the spec — seeded burst
-  workload, sim-backend runner, exact p50/p95/p99 queue-delay percentiles, ≥5-run
-  median+spread methodology, JSON+stdout output, invariant checking. FIFO only, sim only,
-  no Prometheus/CLI/second policy (all deferred per spec).
-- **What came back:** the full bench/ package + ADR-0002 (exact-percentiles-from-raw-
-  samples over bucketed histograms; replay-not-regenerate). Percentile math is nearest-
-  rank over sorted raw samples; median takes the middle run whole (not field-averaged);
-  determinism asserted as a precondition.
-- **Bug caught during implementation:** the first capacity-invariant checker used pairwise
-  interval-overlap, which over-counts when jobs bin-pack (several jobs legitimately sharing
-  one worker within capacity) — same root cause inflated WorkerUtilization above 1.0. Agent
-  caught it, switched to a start-point sweep-line (sum active intervals at each interval
-  start), utilization settled to ~0.86.
-- **What needed correction / verification:** review found the fix had no regression test
-  pinning it — the same gap that let the earlier FIFO starvation bug ship. Had the agent add
-  three hand-constructed capacity tests (bin-packing within capacity, over capacity, adjacent-
-  interval boundary), verified fail-then-pass against a reverted pairwise checker. The agent
-  also corrected a wrong expectation I'd given it: the adjacent-boundary test does NOT
-  differentiate old vs new (both use strict `<` at edges) — it kept the test honest and said
-  so rather than gaming the assertion to match the prediction.
-- **Decision / outcome:** committed. Capacity fix now locked by regression tests. Stale doc
-  comment on the checker also fixed (CLAUDE.md "keep comments current" rule).
-- **Artifacts:** squash-merged to main as a single `feat(bench)` commit (PR #5); ADR-0002
-  (exact percentiles, replay-not-regenerate). Tests green under -race ×5.
-
-### 2026-07-31 — README-accuracy audit and honesty corrections
-
-- **Task handed off:** run an accuracy audit of README.md against the current code
-  and docs/known-issues.md — find every place the README claims a capability that
-  doesn't exist, isn't tested, or is contradicted by a known-issue. Report only,
-  no edits, then apply a specified subset of corrections.
-- **What the audit found:** seven present-tense claims for capabilities that don't
-  exist in the code — real Docker executor ("Not a paper design", but go.mod has
-  zero deps and only FakeExecutor exists), fault tolerance / failure injection (no
-  chaos code at all), lease fencing (LeaseID written but never read — F1),
-  cancellation of in-flight work (both Cancel() are no-ops — F8), retries/idempotency
-  (no retry mechanism — F6), Prometheus/metrics (no metrics code), and benchmark
-  warm-up discard (claimed in methodology, never implemented). Plus overstated claims:
-  "hundreds of thousands of jobs" (blocked by the O(N²) snapshot, F10) and "invariants
-  checked on every run" (only 2 of 7 invariants have automated checkers, F5). The
-  accurate sections (determinism, the two policies, admission/capacity, benchmark
-  methodology) were confirmed correct and tested.
-- **What needed correction / decisions made:** each false claim was tagged
-  soften-the-doc vs. build-the-code. Softened for now: Docker executor and metrics
-  → "(planned)"; fault tolerance and the whole Failure semantics section → framed as
-  intended design, not working behavior; retries invariant → removed from the list
-  (no mechanism to guarantee); scale claim → "tens to thousands today, hundreds of
-  thousands blocked on F10"; invariants-checked claim → narrowed to capacity +
-  work-conservation only. Lease fencing was kept as a design description but reworded
-  to the honest version: at-most-once currently holds only because the simulator never
-  delivers a stale completion event (F1) — which reads as deeper understanding than the
-  overclaim did. Cancellation narrowed to queued-work-only.
-- **Decision / outcome:** README now honestly separates what exists from what's planned.
-  Verified the two at-risk edits by reading the file (not the diff): the Failure
-  semantics section is coherent, and the architecture diagram still renders (the
-  "(planned: Docker...)" text wraps inside the box rather than overflowing). The audit
-  also surfaced that F1 (lease fencing) is a stronger next-build candidate than the
-  warm-cache discount — it converts a just-softened claim back to true and closes a real
-  correctness gap.
-- **Artifacts:** README.md corrections; this entry. No code changed. Audit was
-  report-then-wait; corrections applied finding-by-finding, not bulk.
-
-### 2026-08-01 — Lease fencing: at-most-once by mechanism (F1, F5)
-
-- **Task handed off:** implement lease fencing so the at-most-once invariant is enforced
-  by mechanism rather than holding only because the simulator never delivers a stale
-  completion (F1). Design decision (mine): completions carry the lease they were
-  dispatched under; the scheduler fences any completion whose lease doesn't match the
-  assignment's current lease. Also fix the coupled F5 (at-most-once checker counted
-  dispatches, so a legitimate retry read as a violation).
-- **What came back:** LeaseID added to JobCompleted/JobFailed and to Decision; `Fenced`
-  made a first-class logged Decision outcome alongside `Completed`. enactDispatch mints a
-  deterministic lease (jobID + monotonic counter — no time/UUID/random, so replay stays
-  byte-identical); both executors propagate the lease into the completion they emit; the
-  scheduler accepts a matching-lease completion and fences a mismatched one (logged,
-  rejected, assignment untouched). F5 checker rewritten to count accepted (`Completed`)
-  decisions per job. ADR-0005 written, including why worker-ID matching fails on
-  reassignment-to-the-same-worker.
-- **What needed verification:** the core test (TestLeaseFencingRejectsStaleCompletion)
-  reproduces the exact subtle case — dispatch under L1, fail/retry mints L2, stale L1
-  completion arrives late → must be fenced, only L2 accepted — and was verified
-  fail-before/pass-after by reverting to worker-ID-only matching. Confirmed determinism
-  (grep clean for uuid/time/rand; suite green under -race -count=5) and that the F5 fix
-  counts completions not dispatches, both directions pinned.
-- **Decision / outcome:** at-most-once is now true by mechanism, not by the sim's
-  benevolence — the first "planned" claim from the accuracy audit that the code now earns
-  back. F1 removed and F5 resolved in known-issues. README lines 142/38/163 to flip from
-  "planned" to "implemented" (fencing mechanism only — the rest of Failure semantics stays
-  planned, no chaos harness or lease-expiry timer yet).
-- **Artifacts:** feat commit (2eace33) + ADR-0005; docs commit (079d22e). New tests:
-  TestLeaseFencingRejectsStaleCompletion, TestNormalCompletionAcceptedUnderMatchingLease,
-  and the two F5 checker tests.

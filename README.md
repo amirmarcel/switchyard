@@ -206,7 +206,7 @@ Credibility lives here. Every reported result follows the same protocol:
 
 - Does prioritizing interactive traffic reduce overall throughput, and by how much?
 - What does fairness cost in latency?
-- How much does cache affinity actually matter?
+- How much does cache affinity matter under interactive and batch profiles? (Burst is answered: ~9% p99 win once warm jobs run faster.)
 - Does the candidate policy still beat FIFO under burst traffic, or only at steady state?
 - When does queue starvation first appear?
 - How much does a single worker failure move p99?
@@ -262,7 +262,7 @@ The finish bar matters more than the feature count. A complete, benchmarked v1 p
 
 ## Architecture Decision Records
 
-Target 6–8 ADRs (4 written so far: 0001–0004; see `docs/adr/`). Seeds:
+Target 6–8 ADRs (6 written so far: 0001–0006; see `docs/adr/`). Seeds:
 
 1. Why FIFO as the baseline first.
 2. Why *this* candidate policy (e.g. WFQ or priority+affinity) rather than DRF for v1.
