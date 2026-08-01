@@ -375,3 +375,34 @@ where the agent drifted, and how it was corrected.
   correctness gap.
 - **Artifacts:** README.md corrections; this entry. No code changed. Audit was
   report-then-wait; corrections applied finding-by-finding, not bulk.
+
+### 2026-08-01 — Lease fencing: at-most-once by mechanism (F1, F5)
+
+- **Task handed off:** implement lease fencing so the at-most-once invariant is enforced
+  by mechanism rather than holding only because the simulator never delivers a stale
+  completion (F1). Design decision (mine): completions carry the lease they were
+  dispatched under; the scheduler fences any completion whose lease doesn't match the
+  assignment's current lease. Also fix the coupled F5 (at-most-once checker counted
+  dispatches, so a legitimate retry read as a violation).
+- **What came back:** LeaseID added to JobCompleted/JobFailed and to Decision; `Fenced`
+  made a first-class logged Decision outcome alongside `Completed`. enactDispatch mints a
+  deterministic lease (jobID + monotonic counter — no time/UUID/random, so replay stays
+  byte-identical); both executors propagate the lease into the completion they emit; the
+  scheduler accepts a matching-lease completion and fences a mismatched one (logged,
+  rejected, assignment untouched). F5 checker rewritten to count accepted (`Completed`)
+  decisions per job. ADR-0005 written, including why worker-ID matching fails on
+  reassignment-to-the-same-worker.
+- **What needed verification:** the core test (TestLeaseFencingRejectsStaleCompletion)
+  reproduces the exact subtle case — dispatch under L1, fail/retry mints L2, stale L1
+  completion arrives late → must be fenced, only L2 accepted — and was verified
+  fail-before/pass-after by reverting to worker-ID-only matching. Confirmed determinism
+  (grep clean for uuid/time/rand; suite green under -race -count=5) and that the F5 fix
+  counts completions not dispatches, both directions pinned.
+- **Decision / outcome:** at-most-once is now true by mechanism, not by the sim's
+  benevolence — the first "planned" claim from the accuracy audit that the code now earns
+  back. F1 removed and F5 resolved in known-issues. README lines 142/38/163 to flip from
+  "planned" to "implemented" (fencing mechanism only — the rest of Failure semantics stays
+  planned, no chaos harness or lease-expiry timer yet).
+- **Artifacts:** feat commit (2eace33) + ADR-0005; docs commit (079d22e). New tests:
+  TestLeaseFencingRejectsStaleCompletion, TestNormalCompletionAcceptedUnderMatchingLease,
+  and the two F5 checker tests.
