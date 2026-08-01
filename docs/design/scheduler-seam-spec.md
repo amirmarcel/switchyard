@@ -94,13 +94,19 @@ Every scheduling action emits one `Decision`, whether it dispatches or deliberat
 
 ```go
 type Outcome int
-const ( Dispatch Outcome = iota; Hold; Reject )   // Hold = deliberately leave capacity idle;
-                                                   // Reject = admission-time, see docs/adr/0001-admission-check-for-unplaceable-jobs.md
+const ( Dispatch Outcome = iota; Hold; Reject; Completed; Fenced )
+    // Hold = deliberately leave capacity idle;
+    // Reject = admission-time, see docs/adr/0001-admission-check-for-unplaceable-jobs.md
+    // Completed = an accepted (non-fenced) JobCompleted was applied
+    // Fenced = a JobCompleted/JobFailed was rejected: its lease didn't match
+    //          the assignment's current lease; see docs/adr/0005-lease-fencing.md
 
 type Decision struct {
     Outcome   Outcome
     Job       JobID
-    Worker    WorkerID          // set when Outcome == Dispatch
+    Worker    WorkerID          // set when Outcome == Dispatch, Completed, or Fenced
+    LeaseID   string            // fencing token; set by the scheduler in enactDispatch,
+                                 // never by the Policy; see docs/adr/0005-lease-fencing.md
     Policy    string
     Factors   map[string]float64 // e.g. {"cache_affinity":1, "fairness":0.7, "queue_age_ms":420}
     QueueDelay Time              // now - job.SubmitAt at decision time
