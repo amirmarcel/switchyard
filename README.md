@@ -35,7 +35,7 @@ Switchyard exists to make scheduling policy something you can **change, observe,
 - **Pluggable, comparable policies.** One `Scheduler` core hosting interchangeable policy modules, swapped by config. A FIFO **baseline** and at least one **candidate** policy, measured head to head.
 - **Real execution (planned).** The scheduler core is designed to drive a real Docker executor identically to the simulator; only the in-memory `FakeExecutor` (wall-clock, no containers) exists today.
 - **Reproducible scale.** The simulator replays the *same scheduling code* against workloads from tens to thousands of jobs today; scaling to hundreds of thousands is blocked on a known O(N²) snapshot cost in the scheduler core (known-issue F10).
-- **Correctness, not just speed.** Every run is checked against the capacity and work-conservation invariants below; automated checks for the others (at-most-once, cancellation, dependency-respect, retries) are not yet implemented (known-issue F5) — a policy is only "better" if it is faster *and* still correct.
+- **Correctness, not just speed.** Every run is checked against the capacity and work-conservation invariants below; automated checks for the others (at-most-once, cancellation, dependency-respect) are not yet implemented (known-issue F5) — a policy is only "better" if it is faster *and* still correct.
 - **Multiple workload shapes as first-class inputs.**
 - **Fault tolerance (planned).** Failure injection with measured recovery — not yet built; see Failure semantics.
 
@@ -136,7 +136,7 @@ Making the Decision first-class is deliberate: **observability, replay, debuggin
 
 ## Scheduler invariants (correctness)
 
-A scheduler is not successful because it is fast. It is successful because it is fast **while never violating correctness.** These are checked on every benchmark run, so the story becomes *"p95 improved while all invariants held,"* not just *"p95 improved."* They double as the correctness test suite, and they sit here — before the benchmark — because the benchmark measures how well the scheduler preserves them.
+A scheduler is not successful because it is fast. It is successful because it is fast **while never violating correctness.** Capacity and work-conservation are checked on every benchmark run today; the others are enforced by the scheduler core but not yet automated as run-time checks (see the caveats below and known-issue F5). The goal is that the story becomes *"p95 improved while all invariants held,"* not just *"p95 improved."* They sit here — before the benchmark — because the benchmark measures how well the scheduler preserves them.
 
 - Every submitted job is **eventually scheduled** (no permanent starvation).
 - No job **executes more than once** (at-most-once completion). Lease fencing is designed to uphold this under failure but is not yet wired into the completion path (known-issue F1) — today the invariant holds only because the simulator never delivers a stale completion event.
