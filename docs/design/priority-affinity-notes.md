@@ -1,9 +1,9 @@
 # Priority + cache-affinity — implementation notes
 
 Short design note for the non-obvious modeling calls made while implementing
-`scheduler.PriorityAffinity` per `docs/design/candidate-policy-spec.md` and
-ADR-0003. Not an ADR — no design-weight decision here overrides the spec;
-these are the specific calls the spec left to implementation.
+`scheduler.PriorityAffinity` per ADR-0003. Not an ADR — no design-weight
+decision here overrides ADR-0003; these are the specific calls it left
+to implementation.
 
 ## Warmth updates on dispatch, not completion
 
