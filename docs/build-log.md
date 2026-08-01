@@ -275,3 +275,40 @@ where the agent drifted, and how it was corrected.
   comment on the checker also fixed (CLAUDE.md "keep comments current" rule).
 - **Artifacts:** squash-merged to main as a single `feat(bench)` commit (PR #5); ADR-0002
   (exact percentiles, replay-not-regenerate). Tests green under -race ×5.
+
+### 2026-07-31 — README-accuracy audit and honesty corrections
+
+- **Task handed off:** run an accuracy audit of README.md against the current code
+  and docs/known-issues.md — find every place the README claims a capability that
+  doesn't exist, isn't tested, or is contradicted by a known-issue. Report only,
+  no edits, then apply a specified subset of corrections.
+- **What the audit found:** seven present-tense claims for capabilities that don't
+  exist in the code — real Docker executor ("Not a paper design", but go.mod has
+  zero deps and only FakeExecutor exists), fault tolerance / failure injection (no
+  chaos code at all), lease fencing (LeaseID written but never read — F1),
+  cancellation of in-flight work (both Cancel() are no-ops — F8), retries/idempotency
+  (no retry mechanism — F6), Prometheus/metrics (no metrics code), and benchmark
+  warm-up discard (claimed in methodology, never implemented). Plus overstated claims:
+  "hundreds of thousands of jobs" (blocked by the O(N²) snapshot, F10) and "invariants
+  checked on every run" (only 2 of 7 invariants have automated checkers, F5). The
+  accurate sections (determinism, the two policies, admission/capacity, benchmark
+  methodology) were confirmed correct and tested.
+- **What needed correction / decisions made:** each false claim was tagged
+  soften-the-doc vs. build-the-code. Softened for now: Docker executor and metrics
+  → "(planned)"; fault tolerance and the whole Failure semantics section → framed as
+  intended design, not working behavior; retries invariant → removed from the list
+  (no mechanism to guarantee); scale claim → "tens to thousands today, hundreds of
+  thousands blocked on F10"; invariants-checked claim → narrowed to capacity +
+  work-conservation only. Lease fencing was kept as a design description but reworded
+  to the honest version: at-most-once currently holds only because the simulator never
+  delivers a stale completion event (F1) — which reads as deeper understanding than the
+  overclaim did. Cancellation narrowed to queued-work-only.
+- **Decision / outcome:** README now honestly separates what exists from what's planned.
+  Verified the two at-risk edits by reading the file (not the diff): the Failure
+  semantics section is coherent, and the architecture diagram still renders (the
+  "(planned: Docker...)" text wraps inside the box rather than overflowing). The audit
+  also surfaced that F1 (lease fencing) is a stronger next-build candidate than the
+  warm-cache discount — it converts a just-softened claim back to true and closes a real
+  correctness gap.
+- **Artifacts:** README.md corrections; this entry. No code changed. Audit was
+  report-then-wait; corrections applied finding-by-finding, not bulk.
