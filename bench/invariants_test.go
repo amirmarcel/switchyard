@@ -167,6 +167,62 @@ func TestWorkConservationBoundaryTieNotFlagged(t *testing.T) {
 	}
 }
 
+// TestWorkConservationOutOfOrderCompletionDetectsFreedCapacity exercises the
+// case that motivated switching checkWorkConservation's active-dispatch
+// tracking from insertion-order-FIFO retirement to a min-heap ordered by end
+// time (docs/adr/0006-warm-cache-execution-discount.md): once duration
+// varies per dispatch (the warm-cache discount), a later-dispatched job can
+// finish before an earlier-dispatched one, so insertion order no longer
+// implies completion order.
+//
+// A (dispatched first, index 0) runs the full base duration and occupies
+// half the worker's capacity for [0, 1000). B (dispatched second, index 1,
+// same instant) carries warm_overlap=1.0, so DiscountedDuration halves its
+// duration to 500 — B finishes at t=500, *before* A, despite being inserted
+// after it. A Hold for job C then arrives at t=600, declaring no_capacity
+// with no reservation. By t=600 only A is still genuinely active (B has
+// completed), so half the worker's capacity (enough for C) is truly free —
+// the hold is unexplained and must be flagged.
+//
+// Retiring `active` in plain insertion order (the old FIFO approach) never
+// looks past A (whose end, 1000, is not < 600) to find that B — added
+// after A but ending sooner — has already expired, so it would keep both
+// A's and B's capacity marked used, see no free room, and wrongly let this
+// hold pass. This test fails under that retirement order and passes only
+// because the current min-heap always retires whichever active dispatch
+// truly ends soonest, regardless of insertion order.
+func TestWorkConservationOutOfOrderCompletionDetectsFreedCapacity(t *testing.T) {
+	const baseDuration = api.Time(1000)
+	w := capTestWorkload(1000, baseDuration, map[api.JobID]int{
+		"A": 500, "B": 500, "C": 500,
+	})
+
+	log := []api.Decision{
+		// A: no warm_overlap => full base duration => ends at 1000.
+		dispatchAt("A", 0),
+		// B: warm_overlap=1.0 => halved duration => ends at 500, before A,
+		// despite being dispatched after it in the log.
+		{Outcome: api.Dispatch, Job: "B", Worker: capTestWorker, At: 0, Factors: map[string]float64{"warm_overlap": 1.0}},
+		// By t=600, B has completed (freeing 500) and only A (500) is still
+		// active, so C (needs 500) genuinely fits — this hold is unexplained.
+		{Outcome: api.Hold, Job: "C", Factors: map[string]float64{"no_capacity": 1}, At: 600},
+	}
+
+	violations := checkWorkConservation(w, log)
+	if len(violations) == 0 {
+		t.Fatal("expected an unexplained-hold violation: B's early completion should have freed capacity C fits, but no violation was flagged")
+	}
+	found := false
+	for _, v := range violations {
+		if strings.Contains(v, "job C") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a violation naming job C among %v", violations)
+	}
+}
+
 // TestPriorityAffinityPassesWorkConservationChecker proves the affinity
 // policy's central claim from docs/design/candidate-policy-spec.md — it is
 // work-conserving, so it must never hold a job while a worker it fits is

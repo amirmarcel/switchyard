@@ -6,11 +6,23 @@
 package bench
 
 import (
+	"container/heap"
 	"fmt"
 	"sort"
 
 	"github.com/amirmarcel/switchyard/api"
+	"github.com/amirmarcel/switchyard/simulation"
 )
+
+// dispatchDuration is a Dispatch decision's actual modeled duration: the
+// workload's base JobDuration, reduced by the same warm-cache discount the
+// sim executor applied (Decision.Factors["warm_overlap"], set by
+// scheduler.enactDispatch — see docs/adr/0006-warm-cache-execution-discount.md).
+// Both invariant checks below need this instead of the old fixed
+// w.JobDuration now that duration varies per dispatch.
+func dispatchDuration(w Workload, d api.Decision) api.Time {
+	return simulation.DiscountedDuration(w.JobDuration, d.Factors["warm_overlap"])
+}
 
 // CheckInvariants reconstructs, purely from the decision log, whether the
 // run held the scheduler's correctness contract: every job eventually
@@ -62,8 +74,9 @@ type interval struct {
 }
 
 // CheckCapacityInvariant asserts no worker's dispatched jobs ever overlap
-// beyond its capacity, using each dispatch's fixed w.JobDuration as its
-// occupancy window. It is exported so scheduler_test.go can assert the same
+// beyond its capacity, using each dispatch's actual (possibly warm-cache-
+// discounted, see dispatchDuration) duration as its occupancy window. It is
+// exported so scheduler_test.go can assert the same
 // capacity invariant from the scheduler package's own tests rather than
 // maintaining a second, divergent implementation (see
 // docs/reviews/2026-07-25-opus-code-review.md, finding G1 — the pairwise
@@ -87,7 +100,7 @@ func CheckCapacityInvariant(w Workload, log []api.Decision) []string {
 		}
 		byWorker[d.Worker] = append(byWorker[d.Worker], interval{
 			start: d.At,
-			end:   d.At + w.JobDuration,
+			end:   d.At + dispatchDuration(w, d),
 			needs: jobNeeds[d.Job],
 		})
 	}
@@ -137,6 +150,25 @@ type activeDispatch struct {
 	needs  api.Resources
 }
 
+// activeHeap orders activeDispatch entries by end time so the sweep below
+// can always retire the next-to-expire entry, regardless of dispatch order
+// — required now that the warm-cache discount (ADR-0006) makes duration,
+// and so end time, vary per dispatch; insertion order no longer implies
+// end-time order the way it did when every dispatch shared w.JobDuration.
+type activeHeap []activeDispatch
+
+func (h activeHeap) Len() int           { return len(h) }
+func (h activeHeap) Less(i, j int) bool { return h[i].end < h[j].end }
+func (h activeHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *activeHeap) Push(x any)        { *h = append(*h, x.(activeDispatch)) }
+func (h *activeHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
+}
+
 // checkWorkConservation enforces CLAUDE.md's conditional work-conservation
 // invariant: a Hold is legal only if it's genuinely no-capacity, or it's a
 // declared reservation (FIFO's head_of_line_reserved — see
@@ -148,19 +180,19 @@ type activeDispatch struct {
 // future policies that reserve for reasons other than head-of-line.
 //
 // Free capacity is tracked with a single forward sweep and a running usedCap
-// tally, not a per-hold rescan of the whole log: every dispatch shares the
-// same w.JobDuration, and log.At is non-decreasing in index order (the
-// scheduler appends decisions in real event-processing order), so each
-// dispatch's end time (At+duration) is also non-decreasing in the order
-// dispatches are added. That makes `active` a plain FIFO — the oldest-added
-// entry always expires first — so retiring it costs O(1) amortized per
-// dispatch, the same start-point-sweep idea CheckCapacityInvariant already
-// uses. A policy that legitimately continues past a miss (like
+// tally, not a per-hold rescan of the whole log: log.At is non-decreasing in
+// index order (the scheduler appends decisions in real event-processing
+// order), and `active` is a min-heap ordered by end time, so the
+// next-to-expire entry is always retired in O(log active) regardless of
+// dispatch order — required since the warm-cache discount (ADR-0006) makes
+// duration vary per dispatch, so end time is no longer non-decreasing in
+// insertion order the way it was when every dispatch shared w.JobDuration.
+// This is O(log length x log active) overall for the sweep, plus
+// O(holds x jobs x workers) for the fit check below, which was never the
+// bottleneck. A policy that legitimately continues past a miss (like
 // PriorityAffinity, unlike FIFO's head-of-line break) produces far more
 // Holds than Dispatches; the previous per-hold freeCapacityAt rescan was
-// O(holds x log length), which is what made that shape slow. This is O(log
-// length) overall for the sweep, plus O(holds x jobs x workers) for the fit
-// check below, which was never the bottleneck.
+// O(holds x log length), which is what made that shape slow.
 func checkWorkConservation(w Workload, log []api.Decision) []string {
 	var violations []string
 
@@ -188,8 +220,7 @@ func checkWorkConservation(w Workload, log []api.Decision) []string {
 		}
 	}
 
-	var active []activeDispatch
-	head := 0
+	active := &activeHeap{}
 	usedCap := make(map[api.WorkerID]api.Resources, len(workerCap))
 
 	for i, d := range log {
@@ -198,13 +229,12 @@ func checkWorkConservation(w Workload, log []api.Decision) []string {
 		// a dispatch active) for the same reason freeCapacityAt used to be:
 		// two Schedule calls can share one logical instant, and the earlier
 		// genuinely runs before a same-instant completion is processed.
-		for head < len(active) && active[head].end < d.At {
-			e := active[head]
+		for active.Len() > 0 && (*active)[0].end < d.At {
+			e := heap.Pop(active).(activeDispatch)
 			u := usedCap[e.worker]
 			u.CPUMillis -= e.needs.CPUMillis
 			u.MemBytes -= e.needs.MemBytes
 			usedCap[e.worker] = u
-			head++
 		}
 
 		if d.Outcome == api.Hold && !declaresReservation(d.Factors) {
@@ -236,7 +266,7 @@ func checkWorkConservation(w Workload, log []api.Decision) []string {
 			u.CPUMillis += n.CPUMillis
 			u.MemBytes += n.MemBytes
 			usedCap[d.Worker] = u
-			active = append(active, activeDispatch{end: d.At + w.JobDuration, worker: d.Worker, needs: n})
+			heap.Push(active, activeDispatch{end: d.At + dispatchDuration(w, d), worker: d.Worker, needs: n})
 		}
 	}
 

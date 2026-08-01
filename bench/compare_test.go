@@ -5,6 +5,17 @@
 // affinity hit-rate, alongside every invariant (including work-conservation)
 // holding under both. This is the slice's benchmark-comparison entrypoint,
 // in place of a CLI (see scenario_test.go for the FIFO-only precedent).
+//
+// The p99 delta is the headline the warm-cache execution discount
+// (docs/adr/0006-warm-cache-execution-discount.md) was built to move: before
+// that discount, execution time was fixed regardless of placement, so
+// affinity only ever won on p50 (less queueing contention) while p99 stayed
+// essentially flat (nothing made a warm dispatch actually finish sooner).
+// With the discount, a warm dispatch completes faster, freeing its worker
+// sooner for jobs still waiting — which compounds into a real p99 win, not
+// just a p50 one. This test doesn't assert a specific p99 delta (that's the
+// numbers logged below, which drift with the scenario/seed), only that
+// priority+affinity still beats FIFO.
 package bench
 
 import (
