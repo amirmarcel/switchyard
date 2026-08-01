@@ -17,9 +17,10 @@ func NewExecutor(clock *Clock, queue *EventQueue, duration api.Time) *Executor {
 
 func (e *Executor) Dispatch(d api.Decision) error {
 	e.queue.Push(api.JobCompleted{
-		Job:    d.Job,
-		Worker: d.Worker,
-		Time:   e.clock.Now() + e.duration,
+		Job:     d.Job,
+		Worker:  d.Worker,
+		LeaseID: d.LeaseID,
+		Time:    e.clock.Now() + e.duration,
 	})
 	return nil
 }

@@ -220,6 +220,110 @@ func TestNoStarvationWithNonUniformSizing(t *testing.T) {
 	}
 }
 
+// TestLeaseFencingRejectsStaleCompletion is the review's exact reproduction
+// for F1: a job dispatched under lease L1 fails and is retried, minting a
+// new lease L2 for the same worker; the *original* run's completion then
+// arrives late, after the retry is already live. Worker-ID matching alone
+// cannot catch this — the stale completion carries the correct (unchanged)
+// worker ID, since the retry landed on the same worker. Only the
+// per-dispatch lease token distinguishes "belongs to the assignment I
+// currently hold" from "belongs to a superseded assignment." See
+// docs/adr/0005-lease-fencing.md.
+//
+// Before lease fencing, this event log would be accepted as a real
+// completion by the old (a.Worker != ev.Worker)-only check — wrongly
+// marking the job Completed at t=20 (the stale run) while silently
+// dropping the genuine completion at t=30, because the wrongly-accepted
+// stale event had already deleted the running assignment. After the fix,
+// t=20 is fenced and t=30 is the one and only accepted completion.
+func TestLeaseFencingRejectsStaleCompletion(t *testing.T) {
+	job := api.Job{ID: "j", Needs: api.Resources{CPUMillis: 1000}}
+	worker := api.Worker{ID: "w0", Capacity: api.Resources{CPUMillis: 1000}}
+
+	clock := &simulation.Clock{}
+	queue := simulation.NewEventQueue()
+	exec := simulation.NewExecutor(clock, queue, 1000)
+	sched := scheduler.NewScheduler(scheduler.FIFO{}, clock, exec)
+
+	queue.Push(api.WorkerRegistered{Worker: worker, Time: 0})
+	queue.Push(api.JobSubmitted{Job: job, Time: 0})
+	// run#1 dispatches at t=0 under lease "j-1" (deterministic: jobID +
+	// scheduler-wide monotonic counter, first dispatch overall).
+	// run#1 fails at t=10, accepted (matches the current lease "j-1"):
+	// the assignment is released and FIFO immediately retries, minting
+	// lease "j-2" for the same job on the same worker.
+	queue.Push(api.JobFailed{Job: job.ID, Worker: worker.ID, LeaseID: "j-1", Time: 10})
+	// run#1's original completion lands late, after run#2 is already live
+	// under "j-2" — this must be fenced, not accepted.
+	queue.Push(api.JobCompleted{Job: job.ID, Worker: worker.ID, LeaseID: "j-1", Time: 20})
+	// run#2's genuine completion, under the current lease.
+	queue.Push(api.JobCompleted{Job: job.ID, Worker: worker.ID, LeaseID: "j-2", Time: 30})
+
+	simulation.Run(sched, clock, queue)
+	log := sched.DecisionLog()
+
+	var fenced, completed []api.Decision
+	for _, d := range log {
+		switch d.Outcome {
+		case api.Fenced:
+			fenced = append(fenced, d)
+		case api.Completed:
+			completed = append(completed, d)
+		}
+	}
+
+	if len(fenced) != 1 {
+		t.Fatalf("want exactly 1 Fenced decision (the stale run#1 completion), got %d: %+v", len(fenced), fenced)
+	}
+	if fenced[0].At != 20 || fenced[0].LeaseID != "j-1" {
+		t.Errorf("fenced decision = %+v, want At=20 LeaseID=j-1 (the stale completion)", fenced[0])
+	}
+
+	if len(completed) != 1 {
+		t.Fatalf("want exactly 1 Completed decision (the genuine run#2 completion), got %d: %+v", len(completed), completed)
+	}
+	if completed[0].At != 30 || completed[0].LeaseID != "j-2" {
+		t.Errorf("completed decision = %+v, want At=30 LeaseID=j-2 (the genuine completion) — the stale completion must not be counted", completed[0])
+	}
+
+	dispatchCount := 0
+	for _, d := range log {
+		if d.Outcome == api.Dispatch {
+			dispatchCount++
+		}
+	}
+	if dispatchCount != 2 {
+		t.Errorf("want exactly 2 dispatches (initial + retry after JobFailed), got %d", dispatchCount)
+	}
+}
+
+// TestNormalCompletionAcceptedUnderMatchingLease is the non-regression
+// counterpart to TestLeaseFencingRejectsStaleCompletion: a completion whose
+// lease matches the assignment's current lease (the ordinary, no-failure
+// case) must still be accepted exactly once.
+func TestNormalCompletionAcceptedUnderMatchingLease(t *testing.T) {
+	for _, sc := range scenarios() {
+		t.Run(sc.name, func(t *testing.T) {
+			log := runSim(sc)
+
+			completedCount := make(map[api.JobID]int, len(sc.jobs))
+			for _, d := range log {
+				if d.Outcome == api.Completed {
+					completedCount[d.Job]++
+				}
+				if d.Outcome == api.Fenced {
+					t.Errorf("unexpected Fenced decision in a normal run with no reassignment: %+v", d)
+				}
+			}
+			for _, j := range sc.jobs {
+				if got := completedCount[j.ID]; got != 1 {
+					t.Errorf("job %s completed %d times, want exactly 1", j.ID, got)
+				}
+			}
+		})
+	}
+}
+
 // TestWorkerRegisteredRejectsNowUnplaceablePending is the review's exact
 // reproduction (finding F2): a job submitted before any worker exists is
 // provisionally admitted (admissible can't evaluate it yet); a worker then
