@@ -23,7 +23,7 @@ func NewFakeExecutor(events chan<- api.Event, delay time.Duration, clock api.Clo
 func (e *FakeExecutor) Dispatch(d api.Decision) error {
 	go func() {
 		time.Sleep(e.Delay)
-		e.Events <- api.JobCompleted{Job: d.Job, Worker: d.Worker, Time: e.clock.Now()}
+		e.Events <- api.JobCompleted{Job: d.Job, Worker: d.Worker, LeaseID: d.LeaseID, Time: e.clock.Now()}
 	}()
 	return nil
 }

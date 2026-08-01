@@ -57,15 +57,21 @@ type Outcome int
 const (
 	Dispatch Outcome = iota
 	Hold
-	Reject // admission-time: job can never fit any worker, never enters Pending
+	Reject    // admission-time: job can never fit any worker, never enters Pending
+	Completed // an accepted (non-fenced) JobCompleted was applied
+	Fenced    // a JobCompleted/JobFailed was rejected: its lease didn't match the assignment's current lease
 )
 
 // Decision is the first-class, logged unit of every scheduling action,
-// whether it dispatches or deliberately holds.
+// whether it dispatches, deliberately holds, or resolves a completion.
 type Decision struct {
-	Outcome    Outcome
-	Job        JobID
-	Worker     WorkerID // set when Outcome == Dispatch
+	Outcome Outcome
+	Job     JobID
+	Worker  WorkerID // set when Outcome == Dispatch, Completed, or Fenced
+	// LeaseID is the fencing token generated at dispatch (see
+	// docs/adr/0005-lease-fencing.md). Set by the scheduler in
+	// enactDispatch, never by the Policy — the policy has no lease to give.
+	LeaseID    string
 	Policy     string
 	Factors    map[string]float64
 	QueueDelay Time

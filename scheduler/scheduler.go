@@ -63,9 +63,10 @@ func (s *Scheduler) Handle(e api.Event) []api.Decision {
 	}
 
 	scheduled := s.policy.Schedule(s.snapshot(), now)
-	for _, d := range scheduled {
+	for i, d := range scheduled {
 		if d.Outcome == api.Dispatch {
-			s.enactDispatch(d, now)
+			d = s.enactDispatch(d, now)
+			scheduled[i] = d
 		}
 		s.decisionLog = append(s.decisionLog, d)
 	}
@@ -126,20 +127,32 @@ func (s *Scheduler) apply(e api.Event, now api.Time) ([]api.Decision, bool) {
 
 	case api.JobCompleted:
 		a, ok := s.running[ev.Job]
-		if !ok || a.Worker != ev.Worker {
-			// Stale or duplicate completion for a job that's no longer
-			// (or never was) running under this assignment — ignored.
-			// This is the at-most-once safeguard.
+		if !ok {
+			// No assignment exists for this job at all (already completed,
+			// cancelled, or never dispatched) — nothing to fence against.
 			return nil, false
+		}
+		if a.Worker != ev.Worker || a.LeaseID != ev.LeaseID {
+			return []api.Decision{s.fence(ev.Job, ev.Worker, ev.LeaseID, now)}, false
 		}
 		s.releaseAssignment(a)
 		s.completed[ev.Job] = true
-		return nil, true
+		return []api.Decision{{
+			Outcome: api.Completed,
+			Job:     ev.Job,
+			Worker:  ev.Worker,
+			LeaseID: ev.LeaseID,
+			Policy:  "scheduler",
+			At:      now,
+		}}, true
 
 	case api.JobFailed:
 		a, ok := s.running[ev.Job]
-		if !ok || a.Worker != ev.Worker {
+		if !ok {
 			return nil, false
+		}
+		if a.Worker != ev.Worker || a.LeaseID != ev.LeaseID {
+			return []api.Decision{s.fence(ev.Job, ev.Worker, ev.LeaseID, now)}, false
 		}
 		s.releaseAssignment(a)
 		return nil, true
@@ -217,6 +230,22 @@ func (s *Scheduler) admissible(job api.Job) bool {
 	return false
 }
 
+// fence logs a rejected completion/failure whose lease didn't match the
+// assignment's current lease — e.g. the job was reassigned under a new
+// lease after a partition, and this event belongs to the superseded
+// assignment. See docs/adr/0005-lease-fencing.md.
+func (s *Scheduler) fence(job api.JobID, worker api.WorkerID, staleLease string, now api.Time) api.Decision {
+	return api.Decision{
+		Outcome: api.Fenced,
+		Job:     job,
+		Worker:  worker,
+		LeaseID: staleLease,
+		Policy:  "lease-fencing",
+		Factors: map[string]float64{"stale_lease": 1},
+		At:      now,
+	}
+}
+
 func (s *Scheduler) releaseAssignment(a api.Assignment) {
 	delete(s.running, a.Job)
 	job := s.jobs[a.Job]
@@ -227,8 +256,12 @@ func (s *Scheduler) releaseAssignment(a api.Assignment) {
 }
 
 // enactDispatch enforces the capacity invariant before enacting a Dispatch,
-// records the assignment, and hands the decision to the executor.
-func (s *Scheduler) enactDispatch(d api.Decision, now api.Time) {
+// records the assignment under a fresh lease, and hands the
+// lease-carrying decision to the executor so it can propagate the lease
+// into the completion/failure event it later emits (see
+// docs/adr/0005-lease-fencing.md). Returns the decision with LeaseID set,
+// so the caller logs the same lease the executor was given.
+func (s *Scheduler) enactDispatch(d api.Decision, now api.Time) api.Decision {
 	job, ok := s.jobs[d.Job]
 	if !ok {
 		panic(fmt.Sprintf("scheduler: policy dispatched unknown job %q", d.Job))
@@ -248,6 +281,10 @@ func (s *Scheduler) enactDispatch(d api.Decision, now api.Time) {
 		panic(fmt.Sprintf("scheduler: capacity invariant violated dispatching job %q to worker %q", d.Job, d.Worker))
 	}
 
+	// Deterministic per-dispatch lease: jobID + a monotonic per-scheduler
+	// counter advanced in event-processing order — never a timestamp, UUID,
+	// or unseeded random value, so replaying the same event order always
+	// generates the same leases (see docs/adr/0005-lease-fencing.md).
 	s.leaseSeq++
 	assignment := api.Assignment{
 		Job:     d.Job,
@@ -264,9 +301,11 @@ func (s *Scheduler) enactDispatch(d api.Decision, now api.Time) {
 		s.workers[d.Worker] = warmOnRun(worker, job.CacheKeys)
 	}
 
+	d.LeaseID = assignment.LeaseID
 	if err := s.executor.Dispatch(d); err != nil {
 		panic(fmt.Sprintf("scheduler: executor dispatch failed for job %q: %v", d.Job, err))
 	}
+	return d
 }
 
 // warmOnRun implements the v1 warmth model from

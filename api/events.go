@@ -14,16 +14,22 @@ func (e JobSubmitted) At() Time { return e.Time }
 type JobCompleted struct {
 	Job    JobID
 	Worker WorkerID
-	Time   Time
+	// LeaseID is the lease the dispatch that produced this completion was
+	// issued under. The scheduler rejects a completion whose LeaseID
+	// doesn't match the assignment's current lease — see
+	// docs/adr/0005-lease-fencing.md.
+	LeaseID string
+	Time    Time
 }
 
 func (e JobCompleted) At() Time { return e.Time }
 
 type JobFailed struct {
-	Job    JobID
-	Worker WorkerID
-	Err    error
-	Time   Time
+	Job     JobID
+	Worker  WorkerID
+	LeaseID string
+	Err     error
+	Time    Time
 }
 
 func (e JobFailed) At() Time { return e.Time }

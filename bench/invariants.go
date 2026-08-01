@@ -14,32 +14,37 @@ import (
 
 // CheckInvariants reconstructs, purely from the decision log, whether the
 // run held the scheduler's correctness contract: every job eventually
-// dispatched-or-rejected (no starvation), no job dispatched more than once
-// (at-most-once), and worker capacity never exceeded. Determinism is
-// checked separately, across runs, by the harness (bench/harness.go) —
-// it isn't observable from a single log.
+// dispatched-or-rejected (no starvation), no job accepted-completed more
+// than once (at-most-once — see docs/adr/0005-lease-fencing.md; a job may
+// legitimately be *dispatched* more than once via retry, so at-most-once is
+// checked against accepted completions, not dispatches), and worker
+// capacity never exceeded. Determinism is checked separately, across runs,
+// by the harness (bench/harness.go) — it isn't observable from a single log.
 func CheckInvariants(w Workload, log []api.Decision) []string {
 	var violations []string
 
 	dispatchCount := make(map[api.JobID]int, len(w.Jobs))
 	rejectCount := make(map[api.JobID]int, len(w.Jobs))
+	completedCount := make(map[api.JobID]int, len(w.Jobs))
 	for _, d := range log {
 		switch d.Outcome {
 		case api.Dispatch:
 			dispatchCount[d.Job]++
 		case api.Reject:
 			rejectCount[d.Job]++
+		case api.Completed:
+			completedCount[d.Job]++
 		}
 	}
 
 	for _, tj := range w.Jobs {
 		id := tj.Job.ID
-		dispatches, rejects := dispatchCount[id], rejectCount[id]
+		dispatches, rejects, completions := dispatchCount[id], rejectCount[id], completedCount[id]
 		switch {
 		case dispatches == 0 && rejects == 0:
 			violations = append(violations, fmt.Sprintf("job %s never dispatched or rejected (starvation)", id))
-		case dispatches > 1:
-			violations = append(violations, fmt.Sprintf("job %s dispatched %d times (at-most-once violated)", id, dispatches))
+		case completions > 1:
+			violations = append(violations, fmt.Sprintf("job %s completed %d times (at-most-once violated)", id, completions))
 		case dispatches > 0 && rejects > 0:
 			violations = append(violations, fmt.Sprintf("job %s both dispatched and rejected", id))
 		}

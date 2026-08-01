@@ -9,6 +9,7 @@
 package bench
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/amirmarcel/switchyard/api"
@@ -193,6 +194,70 @@ func TestPriorityAffinityPassesWorkConservationChecker(t *testing.T) {
 
 	if violations := checkWorkConservation(w, log); len(violations) != 0 {
 		t.Fatalf("priority-affinity's holds should all be genuine no-capacity holds (it is work-conserving), got: %v", violations)
+	}
+}
+
+// atMostOnceTestWorkload builds a minimal single-job Workload for exercising
+// CheckInvariants' at-most-once check in isolation, against a hand-built
+// decision log rather than a full scenario run.
+func atMostOnceTestWorkload(job api.JobID) Workload {
+	return Workload{
+		Name:        "at-most-once-test",
+		Workers:     []api.Worker{{ID: "w0", Capacity: api.Resources{CPUMillis: 1000}}},
+		Jobs:        []TimedJob{{Job: api.Job{ID: job, Needs: api.Resources{CPUMillis: 1000}}}},
+		JobDuration: 1000,
+	}
+}
+
+// TestAtMostOnceCheckerIgnoresLegitimateRetry pins the F5 fix
+// (docs/known-issues.md): a job dispatched twice (an ordinary retry after
+// JobFailed) but accepted-completed only once must NOT be flagged as an
+// at-most-once violation. Before the fix, CheckInvariants counted
+// Dispatch decisions rather than Completed decisions, so this exact shape
+// — the normal, mandatory retry behavior CLAUDE.md requires — read as a
+// violation on every benchmark with a retry.
+func TestAtMostOnceCheckerIgnoresLegitimateRetry(t *testing.T) {
+	w := atMostOnceTestWorkload("j")
+
+	log := []api.Decision{
+		{Outcome: api.Dispatch, Job: "j", Worker: "w0", LeaseID: "j-1", At: 0},
+		{Outcome: api.Fenced, Job: "j", Worker: "w0", LeaseID: "j-1", At: 500}, // e.g. a stale JobFailed, irrelevant here
+		// Retried dispatch starts only after run#1's occupancy window
+		// ([0, JobDuration)) has ended, so this log doesn't also trip the
+		// (unrelated) capacity invariant.
+		{Outcome: api.Dispatch, Job: "j", Worker: "w0", LeaseID: "j-2", At: 1000},
+		{Outcome: api.Completed, Job: "j", Worker: "w0", LeaseID: "j-2", At: 2000},
+	}
+
+	if violations := CheckInvariants(w, log); len(violations) != 0 {
+		t.Fatalf("dispatched-twice-completed-once must not violate at-most-once, got: %v", violations)
+	}
+}
+
+// TestAtMostOnceCheckerFlagsTwoAcceptedCompletions is the positive control:
+// two accepted (non-fenced) completions for the same job is a genuine
+// at-most-once violation and must be flagged, regardless of dispatch count.
+func TestAtMostOnceCheckerFlagsTwoAcceptedCompletions(t *testing.T) {
+	w := atMostOnceTestWorkload("j")
+
+	log := []api.Decision{
+		{Outcome: api.Dispatch, Job: "j", Worker: "w0", LeaseID: "j-1", At: 0},
+		{Outcome: api.Completed, Job: "j", Worker: "w0", LeaseID: "j-1", At: 10},
+		{Outcome: api.Completed, Job: "j", Worker: "w0", LeaseID: "j-1", At: 20},
+	}
+
+	violations := CheckInvariants(w, log)
+	if len(violations) == 0 {
+		t.Fatal("expected an at-most-once violation for two accepted completions of the same job")
+	}
+	found := false
+	for _, v := range violations {
+		if strings.Contains(v, "at-most-once violated") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected an at-most-once violation among %v", violations)
 	}
 }
 
