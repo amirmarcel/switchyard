@@ -88,3 +88,35 @@ These back the deterministic-replay invariant and are mandatory in any schedulin
   governs it.
 - Keep them CURRENT: when a file's responsibility changes, update its comment in
   the same change. A stale doc comment is worse than none.
+
+## Documentation roles
+
+Each kind of doc does one job. Do not blur them — putting the wrong content in a
+doc is a defect, even when the content itself is correct.
+
+- **README** — what the project IS and what it can do, for a first-time reader.
+  It describes only what EXISTS (or clearly marks a line as roadmap/planned).
+  Never claim a capability the code doesn't yet have and a test doesn't exercise.
+  When a slice ships a capability, update the README; when something is deferred,
+  do not claim it.
+- **Design docs (`docs/design/`)** — HOW a specific component works or will be
+  built. Interface- and invariant-focused. May describe unbuilt things, but says
+  so. Not decision-rationale (that's an ADR), not project overview (that's README).
+- **ADRs (`docs/adr/`)** — WHY one specific decision was made, immutable once
+  accepted, with the alternatives rejected and what was given up. One decision per
+  ADR. Not how-it-works, not a restatement of the README.
+- **`docs/known-issues.md`** — deferred gaps and findings, each with a scheduled
+  fix milestone. Items graduate out (into the build log) when fixed.
+- **`docs/build-log.md`** — what happened when a slice was built: the handoff,
+  what came back, what was corrected, the decision.
+
+Routing test for any piece of writing:
+- "What is this?" → README
+- "How does it work / how do I build it?" → design doc
+- "Why did we choose this over the alternative?" → ADR
+- "What's a known gap?" → known-issues
+- "What happened when we built it?" → build log
+
+When you write or update any doc, keep it in its lane. If a design doc drifts into
+decision-rationale, move that into an ADR. If the README starts describing
+implementation detail or unbuilt features, fix it.
