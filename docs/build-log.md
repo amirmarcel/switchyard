@@ -35,6 +35,69 @@ where the agent drifted, and how it was corrected.
 
 <!-- newest first -->
 
+### 2026-08-01 — Lease fencing on completion/failure events (F1, F5)
+
+- **Task handed off:** implement lease fencing so at-most-once holds by
+  mechanism, not by luck (`docs/known-issues.md` F1): `api.JobCompleted`/
+  `api.JobFailed` gain a lease-token field; both executors propagate the
+  dispatch's `LeaseID` into the completion/failure event; the scheduler
+  rejects any completion/failure whose lease doesn't match the assignment's
+  current lease, logging the rejection as fenced and leaving the current
+  assignment untouched. Lease generation had to stay deterministic
+  (jobID + monotonic counter, no timestamps/UUIDs/unseeded randomness) to
+  keep the byte-identical decision-log invariant intact. Coupled fix: F5's
+  at-most-once checker (`bench/invariants.go`) counted dispatches, so a
+  legitimate retry read as a violation — fix it to count accepted
+  completions instead. Explicitly out of scope: any chaos/failure-injection
+  harness, F6 (retries), F8 (cancellation), and README edits (proposal only).
+- **What came back:** `api.Decision` and both event types gained `LeaseID`.
+  `enactDispatch` now returns the dispatched `Decision` with `LeaseID` set
+  (previously `Assignment.LeaseID` was generated but never read by
+  anything — grep confirmed exactly one occurrence, the write); `Handle`
+  threads the returned, lease-carrying decision into both the executor call
+  and the log. Both executors (`executor.FakeExecutor`,
+  `simulation.Executor`) copy `Decision.LeaseID` into the `JobCompleted`
+  they construct. The scheduler's `JobCompleted`/`JobFailed` handling now
+  distinguishes three cases: no assignment at all (silently ignored, as
+  before), assignment exists but worker/lease mismatch (fenced — new
+  `api.Fenced` outcome, logged, rejected, assignment untouched), or a match
+  (accepted — `JobCompleted` now also logs a new `api.Completed` outcome).
+  `bench.CheckInvariants`' at-most-once check now counts `Completed`
+  decisions per job instead of `Dispatch` decisions; starvation stays on
+  dispatch/reject counts. ADR-0005 documents the mechanism and why a
+  per-dispatch token is required over worker-ID matching (worker-ID fails
+  exactly when a job is reassigned back onto the *same* worker after a
+  partition — the common case, not an edge case).
+- **What needed correction:** nothing structural — the design was fully
+  specified up front (this was a directed implementation, not an open
+  design task). One judgment call made during implementation: whether a
+  job with no running assignment at all (`!ok`) should also emit a `Fenced`
+  decision for symmetry. Decided no — that case has no assignment to fence
+  against and matches the event's pre-existing "stale/duplicate, nothing to
+  compare" semantics; only a *mismatched* assignment is fencing's concern.
+- **Decision / outcome:** accepted as specified. Verified fail-before/
+  pass-after for both fixes by temporarily reverting to the old logic
+  (worker-ID-only match; dispatch-count-based checker) and confirming the
+  new regression tests fail, then restoring and confirming they pass:
+  `TestLeaseFencingRejectsStaleCompletion` (scheduler) reproduces the
+  review's exact repro — dispatch under L1, `JobFailed` releases and
+  retries under L2, L1's late completion arrives and must be fenced while
+  L2's genuine completion is accepted — and fails against a worker-ID-only
+  revert (0 fenced decisions). `TestAtMostOnceCheckerIgnoresLegitimateRetry`
+  / `TestAtMostOnceCheckerFlagsTwoAcceptedCompletions` (bench) fail against
+  a dispatch-count revert and pass against the fix.
+  `TestNormalCompletionAcceptedUnderMatchingLease` pins the no-regression
+  case (ordinary completion, no reassignment). `go build`, `go vet`, and
+  `go test -race ./...` all clean; existing `TestDeterminism` (unchanged)
+  continues to assert byte-identical logs across reruns, now over logs that
+  include lease-bearing `Dispatch`/`Completed` decisions.
+- **Artifacts:** ADR-0005; `api/events.go`, `api/types.go`,
+  `scheduler/scheduler.go`, `executor/fake.go`, `simulation/executor.go`,
+  `bench/invariants.go`; new tests in `scheduler/scheduler_test.go` and
+  `bench/invariants_test.go`; `docs/known-issues.md` F1/F5 removed
+  (resolved). README wording changes proposed, not applied — see the
+  reviewer's response for the exact lines.
+
 ### 2026-07-25 — checkWorkConservation perf: O(holds × log length) → O(log length)
 
 - **Task handed off:** `TestPriorityAffinityPassesWorkConservationChecker`

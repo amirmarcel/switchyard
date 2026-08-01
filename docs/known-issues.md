@@ -4,17 +4,6 @@ Deferred findings from `docs/reviews/2026-07-25-opus-code-review.md`, each sched
 against the milestone that makes it matter. Items graduate out of this file into the
 build log when fixed. This file should shrink over time.
 
-## Scheduled — before the chaos experiment
-
-- **F1 (CRITICAL): lease fencing is structurally absent.** `Assignment.LeaseID` is
-  written but never read; `api.JobCompleted` carries no lease token, so a stale
-  completion can free a live assignment (breaks at-most-once + capacity). Requires an
-  event-type change and a design call on lease flow. Prerequisite for failure injection.
-- **F5 (MED-HIGH): at-most-once checker counts dispatches, so any legitimate retry reads
-  as a violation.** Coupled to F1 — both stem from the decision log recording dispatches
-  but not completions. Every benchmark with a retry will fail its invariant check the
-  moment failure injection lands.
-
 ## Scheduled — before the real (Docker) executor
 
 - **F7 (MED): `enactDispatch` panics on executor error, after consuming capacity.** Fine
